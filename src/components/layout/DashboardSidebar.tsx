@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, FilePlus2, ListChecks, LayoutDashboard, Settings } from "lucide-react";
+import { Home, FilePlus2, ListChecks, LayoutDashboard, Settings, Bell } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const items = [
@@ -10,6 +10,7 @@ const items = [
   { label: "Report a Problem", href: "/report", icon: FilePlus2 },
   { label: "My Reports", href: "/dashboard/reports", icon: ListChecks },
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { label: "Notifications", href: "/notifications", icon: Bell },
   { label: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 

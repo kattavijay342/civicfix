@@ -7,6 +7,7 @@ import { analyzeReport, AIUnavailableError } from "@/lib/ai";
 import { findPossibleDuplicate } from "@/lib/duplicate-detection";
 import { resolveAssignment } from "@/lib/actions/routing";
 import { logStatusChange } from "@/lib/actions/status-history";
+import { notifyNewAssignment } from "@/lib/actions/notifications";
 import { categoryToDb, categoryFromDb } from "@/lib/db-enums";
 import { categoryLabels } from "@/lib/categories";
 import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
@@ -262,6 +263,7 @@ export async function createReport(
       });
       await admin.from("reports").update({ status: "routed" }).eq("id", reportId);
       await logStatusChange(admin, reportId, "ai_analyzed", "routed", null, "Routed to configured department");
+      await notifyNewAssignment(admin, reportId, assignment.inchargeId, title);
     }
   } catch (err) {
     aiFailed = true;
@@ -284,7 +286,7 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
 
   const { data: report } = await admin
     .from("reports")
-    .select("id, reporter_id, description, category, status")
+    .select("id, reporter_id, title, description, category, status")
     .eq("id", reportId)
     .single();
 
@@ -351,6 +353,7 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
       });
       await admin.from("reports").update({ status: "routed" }).eq("id", reportId);
       await logStatusChange(admin, reportId, "ai_analyzed", "routed", null, "Routed to configured department");
+      await notifyNewAssignment(admin, reportId, assignment.inchargeId, report.title);
     }
 
     return {};
