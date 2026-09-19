@@ -102,7 +102,9 @@ export async function mapReportsToIssues(
       reportedDate: r.created_at,
       department: departmentByReport.get(r.id) ?? "Not yet routed",
       imageUrl: imageUrlByReport.get(r.id),
-      daysPending: r.status === "resolved" ? 0 : daysBetween(r.created_at),
+      // agingLabel() treats 0 as "Resolved", so an unresolved same-day
+      // report must never compute to 0 — floor it at 1.
+      daysPending: r.status === "resolved" ? 0 : Math.max(1, daysBetween(r.created_at)),
       followUps: followUpCountByReport.get(r.id) ?? 0,
       lastFollowUp: lastFollowUpByReport.get(r.id),
       nextFollowUp: nextFollowUpByReport.get(r.id),

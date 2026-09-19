@@ -87,7 +87,9 @@ async function RealReportDetail({ id }: { id: string }) {
 
   const isOwner = session?.user.id === report.reporterId;
   const aiPending = !report.aiAnalysis && report.status === "REPORTED";
-  const daysPending = report.status === "RESOLVED" ? 0 : daysBetween(report.createdAt);
+  // agingLabel() treats 0 as "Resolved", so an unresolved same-day report
+  // must never compute to 0 — floor it at 1.
+  const daysPending = report.status === "RESOLVED" ? 0 : Math.max(1, daysBetween(report.createdAt));
 
   return (
     <div className="bg-surface-muted">

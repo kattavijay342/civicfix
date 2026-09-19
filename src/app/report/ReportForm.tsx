@@ -11,7 +11,7 @@ import { ReportReview } from "@/components/report/ReportReview";
 import { ReportProgress } from "@/components/report/ReportProgress";
 import { categoryLabels, categoryIcons, categoryOrder } from "@/lib/categories";
 import { createReport } from "@/lib/actions/reports";
-import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
+import { isValidReporterName, isValidIndianMobile, formatIndianMobile, mobileDigitsOnly } from "@/lib/validators";
 import { cn } from "@/lib/utils";
 import type { CivicLocation, ProblemCategory, Profile } from "@/lib/types";
 
@@ -32,7 +32,7 @@ export function ReportForm({ profile }: { profile: Profile }) {
   const [category, setCategory] = useState<ProblemCategory | null>(null);
   const [location, setLocation] = useState<CivicLocation | null>(null);
   const [reporterName, setReporterName] = useState(profile.full_name ?? "");
-  const [reporterMobile, setReporterMobile] = useState(profile.mobile_number ?? "");
+  const [reporterMobile, setReporterMobile] = useState(mobileDigitsOnly(profile.mobile_number ?? ""));
 
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitting, setSubmitting] = useState(false);

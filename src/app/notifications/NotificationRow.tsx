@@ -42,7 +42,11 @@ export function NotificationRow({ notification }: { notification: Notification }
         <p className="text-sm font-semibold text-foreground">{notification.title}</p>
         {notification.body && <p className="mt-0.5 text-sm text-foreground-muted">{notification.body}</p>}
         <p className="mt-1 text-xs text-foreground-muted">
-          {new Date(notification.created_at).toLocaleString()}
+          {new Date(notification.created_at).toLocaleString("en-US", {
+            dateStyle: "medium",
+            timeStyle: "short",
+            timeZone: "Asia/Kolkata",
+          })}
         </p>
         {notification.related_report_id && (
           <Link

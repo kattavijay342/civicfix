@@ -46,8 +46,11 @@ export default async function AdminPage() {
           to see any reports — see supabase/migrations/0002_rls_policies.sql.
         </p>
         <div className="mt-4">
+          {/* Keyed on updated_at too: UserRoleRow seeds its dropdowns from
+              `profile` via useState once on mount, so without this the row
+              would keep showing pre-save values until a full reload. */}
           {profiles.map((profile) => (
-            <UserRoleRow key={profile.id} profile={profile} departments={departments} />
+            <UserRoleRow key={`${profile.id}-${profile.updated_at}`} profile={profile} departments={departments} />
           ))}
         </div>
       </section>

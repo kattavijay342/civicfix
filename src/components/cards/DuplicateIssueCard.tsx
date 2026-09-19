@@ -17,7 +17,7 @@ interface DuplicateIssueCardProps {
 
 export function DuplicateIssueCard({
   group,
-  distance = "~120m away",
+  distance,
   category,
   status,
   onContinue,
@@ -52,10 +52,12 @@ export function DuplicateIssueCard({
           </p>
 
           <dl className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-            <div>
-              <dt className="text-foreground-muted">Distance</dt>
-              <dd className="mt-0.5 font-semibold text-foreground">{distance}</dd>
-            </div>
+            {distance && (
+              <div>
+                <dt className="text-foreground-muted">Distance</dt>
+                <dd className="mt-0.5 font-semibold text-foreground">{distance}</dd>
+              </div>
+            )}
             {category && (
               <div>
                 <dt className="text-foreground-muted">Category</dt>
@@ -84,11 +86,6 @@ export function DuplicateIssueCard({
               </button>
             )}
           </div>
-
-          <p className="mt-2 text-[11px] font-medium text-foreground-muted">
-            UI preview only — matching and grouping are not connected to a real duplicate-detection
-            model yet.
-          </p>
         </div>
       </div>
     </div>
