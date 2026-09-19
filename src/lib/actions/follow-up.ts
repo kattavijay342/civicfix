@@ -37,6 +37,9 @@ export async function addFollowUp(
   if (!notes || notes.length < 3) {
     return { error: "Add a short note for this follow-up." };
   }
+  if (notes.length > 1000) {
+    return { error: "Note is too long (1000 characters max)." };
+  }
 
   const admin = createAdminClient();
   const { error } = await admin.from("follow_ups").insert({

@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logStatusChange } from "@/lib/actions/status-history";
 import { statusToDb } from "@/lib/db-enums";
+import { validateImageFile } from "@/lib/upload-limits";
 import type { IssueStatus } from "@/lib/types";
 
 export interface DepartmentActionState {
@@ -88,9 +89,14 @@ export async function submitResolution(
   if (!notes || notes.length < 5) {
     return { error: "Add resolution notes describing what was done." };
   }
+  if (notes.length > 1000) {
+    return { error: "Notes are too long (1000 characters max)." };
+  }
   if (!(afterPhoto instanceof File) || afterPhoto.size === 0) {
     return { error: "Upload a photo showing the resolved issue." };
   }
+  const photoError = validateImageFile(afterPhoto);
+  if (photoError) return { error: photoError };
 
   let afterMediaId: string;
   try {

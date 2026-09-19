@@ -11,6 +11,7 @@ import { notifyNewAssignment } from "@/lib/actions/notifications";
 import { categoryToDb, categoryFromDb } from "@/lib/db-enums";
 import { categoryLabels } from "@/lib/categories";
 import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
+import { validateImageFile } from "@/lib/upload-limits";
 import type { CivicLocation, ProblemCategory } from "@/lib/types";
 
 export type CreateReportState =
@@ -75,6 +76,9 @@ export async function createReport(
 
   if (!description || description.length < 10) {
     return { status: "error", error: "Please describe the problem in at least 10 characters." };
+  }
+  if (description.length > 2000) {
+    return { status: "error", error: "Description is too long (2000 characters max)." };
   }
   if (!categoryToDb[category]) {
     return { status: "error", error: "Please select a valid category." };
@@ -191,6 +195,10 @@ export async function createReport(
   let imageMimeType: string | undefined;
 
   if (photo instanceof File && photo.size > 0) {
+    const validationError = validateImageFile(photo);
+    if (validationError) {
+      return { status: "error", error: validationError };
+    }
     try {
       const buffer = Buffer.from(await photo.arrayBuffer());
       const ext = photo.name.split(".").pop() || "jpg";
