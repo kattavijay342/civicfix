@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { KeyRound } from "lucide-react";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { EmptyState } from "@/components/ui/EmptyState";
