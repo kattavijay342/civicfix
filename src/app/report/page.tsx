@@ -1,249 +1,32 @@
-"use client";
-
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowLeft, ArrowRight, Sparkles } from "lucide-react";
-import { PhotoUploader } from "@/components/ui/PhotoUploader";
-import { SmartLocationField } from "@/components/report/SmartLocationField";
-import { ReporterDetailsField } from "@/components/report/ReporterDetailsField";
-import { ReportReview } from "@/components/report/ReportReview";
-import { ReportProgress } from "@/components/report/ReportProgress";
-import { categoryLabels, categoryIcons, categoryOrder } from "@/lib/categories";
-import { saveReportDraft, type ReportDraft } from "@/lib/report-draft";
-import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
-import { cn } from "@/lib/utils";
-import type { CivicLocation, ProblemCategory } from "@/lib/types";
+import { KeyRound } from "lucide-react";
+import { getSessionProfile } from "@/lib/supabase/server";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { CTAButton } from "@/components/ui/CTAButton";
+import { ReportForm } from "./ReportForm";
 
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
+export const metadata: Metadata = {
+  title: "Report a Problem — CivicFix",
+};
 
-interface FieldErrors {
-  location?: string;
-  description?: string;
-  category?: string;
-  reporterName?: string;
-  reporterMobile?: string;
-}
+export default async function ReportPage() {
+  const session = await getSessionProfile();
 
-export default function ReportPage() {
-  const router = useRouter();
-
-  const [file, setFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [description, setDescription] = useState("");
-  const [category, setCategory] = useState<ProblemCategory | null>(null);
-  const [location, setLocation] = useState<CivicLocation | null>(null);
-  const [reporterName, setReporterName] = useState("");
-  const [reporterMobile, setReporterMobile] = useState("");
-
-  const [errors, setErrors] = useState<FieldErrors>({});
-  const [submitting, setSubmitting] = useState(false);
-  const [step, setStep] = useState<"form" | "review">("form");
-
-  function handleSelectPhoto(f: File) {
-    setFile(f);
-    setPreviewUrl(URL.createObjectURL(f));
-  }
-
-  function handleRemovePhoto() {
-    setFile(null);
-    setPreviewUrl(null);
-  }
-
-  function handleLocationChange(loc: CivicLocation | null) {
-    setLocation(loc);
-    if (loc) setErrors((prev) => ({ ...prev, location: undefined }));
-  }
-
-  function handleReporterNameChange(next: string) {
-    setReporterName(next);
-    setErrors((prev) => ({ ...prev, reporterName: undefined }));
-  }
-
-  function handleReporterMobileChange(next: string) {
-    setReporterMobile(next);
-    setErrors((prev) => ({ ...prev, reporterMobile: undefined }));
-  }
-
-  function handleContinueToReview(e: React.FormEvent) {
-    e.preventDefault();
-
-    const nextErrors: FieldErrors = {};
-    if (!description.trim()) nextErrors.description = "Please describe the problem.";
-    if (!category) nextErrors.category = "Please select a problem category.";
-    if (!location) nextErrors.location = "Please select a location so AI can route this report.";
-    if (!isValidReporterName(reporterName)) nextErrors.reporterName = "Please enter your name.";
-    if (!isValidIndianMobile(reporterMobile))
-      nextErrors.reporterMobile = "Please enter a valid 10-digit mobile number.";
-
-    if (Object.keys(nextErrors).length > 0) {
-      setErrors(nextErrors);
-      return;
-    }
-    setErrors({});
-    setStep("review");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  function handleEditReport() {
-    setStep("form");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  async function handleConfirmAnalyze() {
-    setSubmitting(true);
-
-    const imageDataUrl = file ? await fileToDataUrl(file) : undefined;
-
-    const draft: ReportDraft = {
-      imageDataUrl,
-      imageIsDemo: !imageDataUrl,
-      description: description.trim(),
-      location: location as CivicLocation,
-      category: category as ProblemCategory,
-      reporterName: reporterName.trim(),
-      reporterMobile: formatIndianMobile(reporterMobile),
-      submittedAt: new Date().toISOString(),
-    };
-    saveReportDraft(draft);
-
-    setTimeout(() => {
-      router.push("/report/analysis");
-    }, 700);
-  }
-
-  return (
-    <div className="bg-surface-muted">
-      <div className="mx-auto max-w-3xl px-4 py-10 sm:px-6 sm:py-14 lg:px-8">
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-foreground-muted hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          Back to home
-        </Link>
-
-        <div className="mt-6">
-          <span className="text-sm font-semibold text-civic-700">Report a Problem</span>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight text-foreground">
-            {step === "review" ? "Review your report" : "What's the issue?"}
-          </h1>
-          <p className="mt-1 text-sm text-foreground-muted">
-            {step === "review"
-              ? "Check everything looks right before AI analyzes it."
-              : "Add a photo and a few details — AI will analyze it and route it to the right department."}
-          </p>
-          <div className="mt-4">
-            <ReportProgress current={step === "review" ? 1 : 0} />
-          </div>
-        </div>
-
-        {step === "review" && location ? (
-          <div className="mt-8">
-            <ReportReview
-              previewUrl={previewUrl}
-              description={description.trim()}
-              category={category as ProblemCategory}
-              location={location}
-              reporterName={reporterName.trim()}
-              reporterMobile={formatIndianMobile(reporterMobile)}
-              onEdit={handleEditReport}
-              onConfirm={handleConfirmAnalyze}
-              submitting={submitting}
-            />
-          </div>
-        ) : (
-          <form onSubmit={handleContinueToReview} className="mt-8 flex flex-col gap-8">
-            <section className="rounded-2xl border border-border bg-white p-6">
-              <h2 className="text-sm font-semibold text-foreground">Photo</h2>
-              <p className="mt-1 text-xs text-foreground-muted">
-                A clear photo helps AI assess the issue accurately. Optional, but recommended.
-              </p>
-              <div className="mt-4">
-                <PhotoUploader previewUrl={previewUrl} onSelect={handleSelectPhoto} onRemove={handleRemovePhoto} />
-              </div>
-            </section>
-
-            <section className="rounded-2xl border border-border bg-white p-6">
-              <h2 className="text-sm font-semibold text-foreground">Problem Description</h2>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={4}
-                placeholder="Describe the civic problem... e.g. There's a large pothole in the middle of the road that's been growing after the rain."
-                className="mt-3 w-full rounded-xl border border-border bg-surface-muted/40 px-4 py-3 text-sm leading-relaxed text-foreground placeholder:text-foreground-muted/70 focus-visible:border-civic-400"
-              />
-              {errors.description && <p className="mt-1.5 text-xs font-medium text-priority-critical">{errors.description}</p>}
-            </section>
-
-            <section className="rounded-2xl border border-border bg-white p-6">
-              <h2 className="text-sm font-semibold text-foreground">Problem Category</h2>
-              <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-                {categoryOrder.map((cat) => {
-                  const Icon = categoryIcons[cat];
-                  const selected = category === cat;
-                  return (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setCategory(cat)}
-                      className={cn(
-                        "flex items-center gap-2 rounded-xl border px-3 py-2.5 text-left text-xs font-medium transition",
-                        selected
-                          ? "border-civic-400 bg-civic-50 text-civic-700"
-                          : "border-border bg-surface-muted/40 text-foreground hover:border-civic-200",
-                      )}
-                    >
-                      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                      {categoryLabels[cat]}
-                    </button>
-                  );
-                })}
-              </div>
-              {errors.category && <p className="mt-2 text-xs font-medium text-priority-critical">{errors.category}</p>}
-            </section>
-
-            <SmartLocationField value={location} onChange={handleLocationChange} error={errors.location} />
-
-            <ReporterDetailsField
-              name={reporterName}
-              mobile={reporterMobile}
-              onNameChange={handleReporterNameChange}
-              onMobileChange={handleReporterMobileChange}
-              nameError={errors.reporterName}
-              mobileError={errors.reporterMobile}
-            />
-
-            <section className="flex items-start gap-3 rounded-2xl border border-civic-200 bg-civic-50 p-5">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-civic-600 text-white">
-                <Sparkles className="h-4.5 w-4.5" aria-hidden="true" />
-              </span>
-              <div>
-                <p className="text-sm font-semibold text-civic-800">Priority will be assessed by AI</p>
-                <p className="mt-1 text-xs text-civic-700">
-                  You don&apos;t need to set a priority — AI reads the photo and description to score
-                  severity automatically.
-                </p>
-              </div>
-            </section>
-
-            <button
-              type="submit"
-              className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-civic-600 px-6 py-3.5 text-base font-medium text-white shadow-sm transition-all hover:bg-civic-700 sm:w-auto sm:self-center sm:px-10"
-            >
-              Continue to Review
-              <ArrowRight className="h-4 w-4" aria-hidden="true" />
-            </button>
-          </form>
-        )}
+  if (!session) {
+    return (
+      <div className="mx-auto max-w-xl px-4 py-16 sm:px-6">
+        <EmptyState
+          icon={<KeyRound className="h-5 w-5" aria-hidden="true" />}
+          title="Sign in to report a problem"
+          description="Reports are tied to your account so you can track their status and see the resolution."
+          action={
+            <CTAButton href="/sign-in">Sign In</CTAButton>
+          }
+        />
       </div>
-    </div>
-  );
+    );
+  }
+
+  return <ReportForm profile={session.profile} />;
 }

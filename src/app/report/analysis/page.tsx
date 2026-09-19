@@ -1,37 +1,26 @@
-"use client";
-
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowLeft, ArrowRight, Sparkles, Building2, FileText, MapPin } from "lucide-react";
+import { notFound } from "next/navigation";
+import { ArrowLeft, ArrowRight, Sparkles, Building2, MapPin, AlertTriangle } from "lucide-react";
 import { PriorityBadge } from "@/components/ui/PriorityBadge";
-import { DuplicateIssueCard } from "@/components/cards/DuplicateIssueCard";
-import { JurisdictionChain } from "@/components/cards/JurisdictionChain";
 import { ReportProgress } from "@/components/report/ReportProgress";
-import { loadReportDraft, DEFAULT_DRAFT, type ReportDraft } from "@/lib/report-draft";
-import { categoryAIPresets } from "@/lib/ai-presets";
+import { JurisdictionChain } from "@/components/cards/JurisdictionChain";
 import { categoryLabels } from "@/lib/categories";
-import { duplicateGroups } from "@/lib/sample-data";
+import { getReportDetail } from "@/lib/data/report-detail";
+import { RetryAnalysisButton } from "./RetryAnalysisButton";
 
-export default function AnalysisPage() {
-  const router = useRouter();
-  const [draft, setDraft] = useState<ReportDraft | null>(null);
-  const [analyzing, setAnalyzing] = useState(true);
-  const [dupDismissed, setDupDismissed] = useState(false);
+export default async function AnalysisPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ reportId?: string }>;
+}) {
+  const { reportId } = await searchParams;
+  if (!reportId) notFound();
 
-  useEffect(() => {
-    // sessionStorage is only available client-side; reading it here (rather
-    // than during render) avoids an SSR/hydration content mismatch.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setDraft(loadReportDraft() ?? DEFAULT_DRAFT);
-    const t = setTimeout(() => setAnalyzing(false), 1500);
-    return () => clearTimeout(t);
-  }, []);
+  const report = await getReportDetail(reportId);
+  if (!report) notFound();
 
-  if (!draft) return null;
-
-  const preset = categoryAIPresets[draft.category];
+  const { aiAnalysis } = report;
 
   return (
     <div className="bg-surface-muted">
@@ -41,59 +30,70 @@ export default function AnalysisPage() {
           className="inline-flex items-center gap-1.5 text-sm font-medium text-foreground-muted hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          Back to edit report
+          Report another problem
         </Link>
 
         <div className="mt-6">
           <span className="text-sm font-semibold text-civic-700">AI Analysis</span>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight text-foreground">
-            {analyzing ? "Analyzing your report…" : "Here's what AI found"}
+            {aiAnalysis ? "Here's what AI found" : "Report saved"}
           </h1>
           <div className="mt-4">
-            <ReportProgress current={2} />
+            <ReportProgress current={aiAnalysis ? 2 : 1} />
           </div>
         </div>
 
-        {analyzing ? (
-          <div className="mt-10 flex flex-col items-center justify-center rounded-2xl border border-border bg-white py-24">
-            <span className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-civic-600 text-white shadow-lg">
-              <Sparkles className="h-7 w-7" aria-hidden="true" />
-              <span className="absolute -right-1 -top-1 h-3 w-3 animate-ping rounded-full bg-civic-400" aria-hidden="true" />
-              <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-civic-300" aria-hidden="true" />
-            </span>
-            <p className="mt-5 text-sm font-medium text-foreground-muted">
-              Reading the photo and description…
+        {!aiAnalysis ? (
+          <div className="mt-10 flex flex-col items-center rounded-2xl border border-priority-medium/30 bg-priority-medium-bg px-6 py-14 text-center">
+            <AlertTriangle className="h-8 w-8 text-priority-medium" aria-hidden="true" />
+            <h3 className="mt-4 text-base font-semibold text-foreground">
+              AI analysis is temporarily unavailable.
+            </h3>
+            <p className="mt-1.5 max-w-sm text-sm text-foreground-muted">
+              Your report was saved successfully and is safe — report #{report.id.slice(0, 8)}. You can retry
+              analysis now, or check back later; it will also be retried the next time you open this page.
             </p>
-            <div className="mt-4 h-1.5 w-48 overflow-hidden rounded-full bg-surface-muted">
-              <div className="h-full w-2/3 animate-pulse rounded-full bg-civic-500" />
-            </div>
+            <RetryAnalysisButton reportId={report.id} />
+            <Link
+              href={`/reports/${report.id}`}
+              className="mt-4 text-sm font-medium text-civic-700 hover:underline"
+            >
+              View report details anyway
+            </Link>
           </div>
         ) : (
           <div className="mt-8 grid gap-6 lg:grid-cols-[1.1fr_1fr]">
             <div className="flex flex-col gap-6">
-              <div className="relative aspect-[4/3] overflow-hidden rounded-2xl border border-border">
-                <Image
-                  src={draft.imageDataUrl ?? "/images/hero-pothole.jpg"}
-                  alt="Submitted photo of the reported civic issue"
-                  fill
-                  sizes="(min-width: 1024px) 560px, 90vw"
-                  className="object-cover"
-                />
-                {draft.imageIsDemo && (
-                  <span className="absolute left-3 top-3 rounded-full bg-black/60 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">
-                    Demo image
-                  </span>
+              <div className="relative aspect-[4/3] overflow-hidden rounded-2xl border border-border bg-surface-muted">
+                {report.media[0]?.url ? (
+                  <Image
+                    src={report.media[0].url}
+                    alt="Submitted photo of the reported civic issue"
+                    fill
+                    sizes="(min-width: 1024px) 560px, 90vw"
+                    className="object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-sm text-foreground-muted">
+                    No photo attached
+                  </div>
                 )}
               </div>
 
-              {!dupDismissed && (
-                <DuplicateIssueCard
-                  group={duplicateGroups[0]}
-                  category={categoryLabels[draft.category]}
-                  status="In Progress"
-                  dismissible
-                  onContinue={() => setDupDismissed(true)}
-                />
+              {report.duplicateOf && (
+                <div className="rounded-2xl border border-priority-medium/30 bg-priority-medium-bg p-5">
+                  <p className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                    <AlertTriangle className="h-4 w-4 text-priority-medium" aria-hidden="true" />
+                    Flagged as a possible duplicate
+                  </p>
+                  <p className="mt-1.5 text-sm text-foreground-muted">
+                    Similar to{" "}
+                    <Link href={`/reports/${report.duplicateOf.id}`} className="font-medium text-civic-700 hover:underline">
+                      &ldquo;{report.duplicateOf.title}&rdquo;
+                    </Link>
+                    . A government reviewer will check both.
+                  </p>
+                </div>
               )}
             </div>
 
@@ -104,13 +104,13 @@ export default function AnalysisPage() {
                     <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                   </span>
                   <span className="text-sm font-semibold text-foreground">AI Analysis</span>
-                  <span className="ml-auto rounded-full bg-priority-medium-bg px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-priority-medium">
-                    Demo Analysis
+                  <span className="ml-auto rounded-full bg-civic-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-civic-700">
+                    {aiAnalysis.model}
                   </span>
                 </div>
 
                 <div className="space-y-5 px-6 py-5">
-                  <p className="text-base font-semibold text-foreground">{preset.problemLabel}</p>
+                  <p className="text-base font-semibold text-foreground">{aiAnalysis.problemSummary}</p>
 
                   <div className="grid grid-cols-2 gap-4">
                     <div>
@@ -118,63 +118,65 @@ export default function AnalysisPage() {
                         Priority
                       </span>
                       <div className="mt-1.5">
-                        <PriorityBadge priority={preset.priority} />
+                        <PriorityBadge priority={aiAnalysis.priority} />
                       </div>
                     </div>
                     <div>
                       <span className="text-xs font-medium uppercase tracking-wide text-foreground-muted">
                         Severity
                       </span>
-                      <p className="mt-1.5 text-sm font-semibold text-foreground">{preset.severity} / 100</p>
+                      <div className="mt-1.5">
+                        <PriorityBadge priority={aiAnalysis.severity} />
+                      </div>
                     </div>
                     <div>
                       <span className="text-xs font-medium uppercase tracking-wide text-foreground-muted">
                         Confidence
                       </span>
-                      <p className="mt-1.5 text-sm font-semibold text-foreground">{preset.confidence}%</p>
+                      <p className="mt-1.5 text-sm font-semibold text-foreground">
+                        {Math.round(aiAnalysis.confidence * 100)}%
+                      </p>
                     </div>
                     <div>
                       <span className="text-xs font-medium uppercase tracking-wide text-foreground-muted">
                         Category
                       </span>
-                      <p className="mt-1.5 text-sm font-semibold text-foreground">{categoryLabels[draft.category]}</p>
+                      <p className="mt-1.5 text-sm font-semibold text-foreground">{categoryLabels[report.category]}</p>
                     </div>
                   </div>
 
                   <div className="border-t border-border pt-4">
                     <span className="text-xs font-medium uppercase tracking-wide text-foreground-muted">
-                      Suggested Department
+                      AI-Recommended Department
                     </span>
-                    <p className="mt-1 text-sm font-semibold text-civic-700">{preset.departmentLabel}</p>
-                    <span className="mt-3 block text-xs font-medium uppercase tracking-wide text-foreground-muted">
-                      Suggested In-charge
-                    </span>
-                    <p className="mt-1 text-sm font-semibold text-foreground">{preset.inCharge}</p>
+                    <p className="mt-1 text-sm font-semibold text-civic-700">{aiAnalysis.recommendedDepartment}</p>
+                    <p className="mt-1 text-[11px] text-foreground-muted">
+                      A recommendation only — actual routing below comes from CivicFix&apos;s configured department
+                      mapping.
+                    </p>
                   </div>
 
                   <div className="border-t border-border pt-4">
                     <span className="text-xs font-medium uppercase tracking-wide text-foreground-muted">
-                      AI Explanation
+                      AI Reasoning
                     </span>
-                    <p className="mt-1.5 text-sm leading-relaxed text-foreground-muted">{preset.explanationEn}</p>
+                    <p className="mt-1.5 text-sm leading-relaxed text-foreground-muted">{aiAnalysis.reasoning}</p>
                   </div>
-                </div>
-
-                <div className="border-t border-border bg-surface-muted/60 px-6 py-3">
-                  <p className="text-[11px] leading-relaxed text-foreground-muted">
-                    Sample analysis for UI preview — not generated by a live AI model in Phase 1A.
-                  </p>
                 </div>
               </div>
 
               <div className="rounded-2xl border border-border bg-white p-6">
-                <h2 className="text-sm font-semibold text-foreground">AI Routing</h2>
+                <h2 className="text-sm font-semibold text-foreground">Routing</h2>
                 <ol className="mt-4 flex flex-col gap-3">
                   {[
-                    { icon: FileText, label: "Citizen Report" },
-                    { icon: Sparkles, label: "AI Analysis" },
-                    { icon: Building2, label: `${preset.department} Department` },
-                    { icon: MapPin, label: preset.inCharge },
+                    { icon: Sparkles, label: "AI Analysis Complete" },
+                    {
+                      icon: Building2,
+                      label: report.assignment ? report.assignment.departmentName : "Awaiting department routing",
+                    },
+                    ...(report.assignment?.inchargeName
+                      ? [{ icon: MapPin, label: report.assignment.inchargeName }]
+                      : []),
                   ].map((step, i, arr) => {
                     const Icon = step.icon;
                     return (
@@ -193,21 +195,28 @@ export default function AnalysisPage() {
                   })}
                 </ol>
                 <p className="mt-4 border-t border-border pt-3 text-xs text-foreground-muted">
-                  Government users don&apos;t assign this manually — AI already identified the
-                  department and in-charge.
+                  Government users don&apos;t assign this manually — routing follows CivicFix&apos;s configured
+                  department mapping and jurisdiction.
                 </p>
               </div>
 
-              <JurisdictionChain location={draft.location} />
+              <JurisdictionChain location={report.location} />
 
-              <button
-                type="button"
-                onClick={() => router.push("/report/complaint")}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-civic-600 px-6 py-3.5 text-base font-medium text-white shadow-sm transition-all hover:bg-civic-700"
-              >
-                Generate Complaint
-                <ArrowRight className="h-4 w-4" aria-hidden="true" />
-              </button>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Link
+                  href={`/reports/${report.id}`}
+                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-full bg-civic-600 px-6 py-3.5 text-base font-medium text-white shadow-sm transition-all hover:bg-civic-700"
+                >
+                  View Full Report
+                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </Link>
+                <Link
+                  href={`/report/complaint?reportId=${report.id}`}
+                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-full border border-border bg-white px-6 py-3.5 text-base font-medium text-foreground shadow-sm transition-all hover:border-civic-300"
+                >
+                  Generate Complaint Letter
+                </Link>
+              </div>
             </div>
           </div>
         )}

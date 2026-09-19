@@ -87,7 +87,7 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
       landmark: l.trim() || undefined,
       latitude: lat,
       longitude: lng,
-      source: "manual",
+      source: pinSource === "gps" && lat != null && lng != null ? "gps" : "manual",
     });
   }
 
