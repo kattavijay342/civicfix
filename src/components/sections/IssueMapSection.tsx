@@ -1,5 +1,6 @@
 import { MapPreview } from "@/components/cards/MapPreview";
 import { Reveal } from "@/components/ui/Reveal";
+import { sampleIssues } from "@/lib/sample-data";
 
 export function IssueMapSection() {
   return (
@@ -17,12 +18,12 @@ export function IssueMapSection() {
         </Reveal>
 
         <Reveal delayMs={120} className="mt-10">
-          <MapPreview />
+          <MapPreview issues={sampleIssues} />
         </Reveal>
 
         <p className="mt-4 text-center text-xs text-foreground-muted">
-          Preview surface with sample coordinates — a live map provider (Google Maps, Mapbox, or
-          Leaflet) can be connected behind this layout in a later phase.
+          Sample issues shown for preview — a live map/geocoding provider can be connected behind
+          this layout later (see the Phase 2 report).
         </p>
       </div>
     </section>

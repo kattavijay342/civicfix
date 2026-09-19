@@ -1,11 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { MapPin, X } from "lucide-react";
 import { PriorityBadge } from "@/components/ui/PriorityBadge";
 import type { CivicIssue } from "@/lib/types";
 import { locationHeadline } from "@/lib/location-format";
-import { sampleIssues } from "@/lib/sample-data";
 import { cn } from "@/lib/utils";
 
 interface MapMarker extends Pick<CivicIssue, "id" | "title" | "location" | "priority" | "department"> {
@@ -13,32 +12,17 @@ interface MapMarker extends Pick<CivicIssue, "id" | "title" | "location" | "prio
   y: number;
 }
 
-const markerPositions: Record<string, { x: number; y: number }> = {
-  "CF-1042": { x: 28, y: 38 },
-  "CF-1039": { x: 52, y: 24 },
-  "CF-1035": { x: 68, y: 55 },
-  "CF-1021": { x: 40, y: 68 },
-  "CF-1018": { x: 78, y: 32 },
-  "CF-0998": { x: 20, y: 62 },
-};
-
-/**
- * Markers are built from the same sample issues (and their structured
- * State/District/Constituency/Area location) used across the rest of the
- * app, so every marker can eventually carry full jurisdiction metadata —
- * x/y here are decorative placeholder screen-space coordinates, not real
- * lat/lng, until a real map provider is connected.
- */
-const markers: MapMarker[] = sampleIssues
-  .filter((issue) => markerPositions[issue.id])
-  .map((issue) => ({
-    id: issue.id,
-    title: issue.title,
-    location: issue.location,
-    priority: issue.priority,
-    department: issue.department,
-    ...markerPositions[issue.id],
-  }));
+/** Deterministic pseudo-position from an id string — spreads markers across
+ * the illustrative surface without claiming any real geographic projection.
+ * No map/geocoding provider is configured (see Phase 2 report), so this is
+ * intentionally NOT derived from latitude/longitude. */
+function hashPosition(id: string): { x: number; y: number } {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const x = 15 + (h % 7000) / 100; // 15 - 85
+  const y = 15 + ((h >>> 8) % 7000) / 100;
+  return { x, y };
+}
 
 const markerColor: Record<MapMarker["priority"], string> = {
   CRITICAL: "bg-priority-critical",
@@ -59,8 +43,20 @@ const heatZones = [
  * (Google Maps, Mapbox, Leaflet, etc.) can be dropped in behind these
  * coordinates in a later phase without reworking the UI.
  */
-export function MapPreview() {
-  const [active, setActive] = useState<MapMarker | null>(markers[0]);
+export function MapPreview({ issues }: { issues: CivicIssue[] }) {
+  const markers: MapMarker[] = useMemo(
+    () =>
+      issues.map((issue) => ({
+        id: issue.id,
+        title: issue.title,
+        location: issue.location,
+        priority: issue.priority,
+        department: issue.department,
+        ...hashPosition(issue.id),
+      })),
+    [issues]
+  );
+  const [active, setActive] = useState<MapMarker | null>(markers[0] ?? null);
 
   return (
     <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-border bg-[#eef3ee] sm:aspect-[16/9]">
