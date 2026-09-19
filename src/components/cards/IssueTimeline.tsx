@@ -1,20 +1,23 @@
-import { FileEdit, Sparkles, Route, Loader2, CheckCircle2 } from "lucide-react";
+import { FileEdit, Sparkles, Route, CircleDot, Loader2, CheckCircle2 } from "lucide-react";
 import type { IssueStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const steps = [
   { key: "reported", label: "Reported", icon: FileEdit },
   { key: "analyzed", label: "AI Analyzed", icon: Sparkles },
-  { key: "routed", label: "Automatically Routed", icon: Route },
+  { key: "routed", label: "Routed", icon: Route },
+  { key: "acknowledged", label: "Acknowledged", icon: CircleDot },
   { key: "progress", label: "In Progress", icon: Loader2 },
   { key: "resolved", label: "Resolved", icon: CheckCircle2 },
 ] as const;
 
 const completedCountByStatus: Record<IssueStatus, number> = {
   REPORTED: 1,
-  ASSIGNED: 3,
-  IN_PROGRESS: 4,
-  RESOLVED: 5,
+  AI_ANALYZED: 2,
+  ROUTED: 3,
+  ACKNOWLEDGED: 4,
+  IN_PROGRESS: 5,
+  RESOLVED: 6,
 };
 
 export function IssueTimeline({ status }: { status: IssueStatus }) {

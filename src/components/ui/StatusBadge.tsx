@@ -1,10 +1,12 @@
-import { CheckCircle2, CircleDot, ClipboardList, Loader2 } from "lucide-react";
+import { CheckCircle2, CircleDot, ClipboardList, Loader2, Route, Sparkles } from "lucide-react";
 import type { IssueStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const statusLabels: Record<IssueStatus, string> = {
   REPORTED: "Reported",
-  ASSIGNED: "Assigned",
+  AI_ANALYZED: "AI Analyzed",
+  ROUTED: "Routed",
+  ACKNOWLEDGED: "Acknowledged",
   IN_PROGRESS: "In Progress",
   RESOLVED: "Resolved",
 };
@@ -19,10 +21,22 @@ const config: Record<
     bg: "bg-status-reported-bg",
     icon: ClipboardList,
   },
-  ASSIGNED: {
-    label: "Assigned",
-    text: "text-status-assigned",
-    bg: "bg-status-assigned-bg",
+  AI_ANALYZED: {
+    label: "AI Analyzed",
+    text: "text-status-ai-analyzed",
+    bg: "bg-status-ai-analyzed-bg",
+    icon: Sparkles,
+  },
+  ROUTED: {
+    label: "Routed",
+    text: "text-status-routed",
+    bg: "bg-status-routed-bg",
+    icon: Route,
+  },
+  ACKNOWLEDGED: {
+    label: "Acknowledged",
+    text: "text-status-acknowledged",
+    bg: "bg-status-acknowledged-bg",
     icon: CircleDot,
   },
   IN_PROGRESS: {

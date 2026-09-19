@@ -2,22 +2,34 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Menu, X, MapPinned } from "lucide-react";
+import { Menu, X, MapPinned, LogOut } from "lucide-react";
 import { CTAButton } from "@/components/ui/CTAButton";
 import { cn } from "@/lib/utils";
+import { signOut } from "@/lib/actions/auth";
+import { roleHomePath } from "@/lib/role-routes";
+import type { Profile } from "@/lib/types";
 
 const navLinks = [
   { label: "Home", href: "/" },
   { label: "How It Works", href: "/#how-it-works" },
   { label: "Issues", href: "/#explore" },
-  { label: "Dashboard", href: "/dashboard" },
-  { label: "Government", href: "/government" },
   { label: "About", href: "/#about" },
 ];
 
-export function Navbar() {
+const roleLabels: Record<string, string> = {
+  citizen: "Citizen",
+  government: "Authorized Government User",
+  department_incharge: "Department In-charge",
+  admin: "Admin",
+};
+
+export function Navbar({ profile }: { profile: Profile | null }) {
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const homeLink = profile
+    ? { label: roleLabels[profile.role] ?? "Dashboard", href: roleHomePath(profile.role) }
+    : null;
+  const links = homeLink ? [...navLinks, homeLink] : navLinks;
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -62,7 +74,7 @@ export function Navbar() {
         </Link>
 
         <ul className="hidden items-center gap-1 lg:flex">
-          {navLinks.map((link) => (
+          {links.map((link) => (
             <li key={link.href}>
               <Link
                 href={link.href}
@@ -75,12 +87,24 @@ export function Navbar() {
         </ul>
 
         <div className="hidden items-center gap-2 lg:flex">
-          <Link
-            href="/sign-in"
-            className="rounded-full px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
-          >
-            Sign In
-          </Link>
+          {profile ? (
+            <form action={signOut}>
+              <button
+                type="submit"
+                className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
+              >
+                <LogOut className="h-4 w-4" aria-hidden="true" />
+                Sign Out
+              </button>
+            </form>
+          ) : (
+            <Link
+              href="/sign-in"
+              className="rounded-full px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
+            >
+              Sign In
+            </Link>
+          )}
           <CTAButton href="/report" size="md">
             Report a Problem
           </CTAButton>
@@ -104,7 +128,7 @@ export function Navbar() {
           className="border-t border-border bg-white px-4 pb-6 pt-2 lg:hidden animate-fade-in"
         >
           <ul className="flex flex-col gap-1">
-            {navLinks.map((link) => (
+            {links.map((link) => (
               <li key={link.href}>
                 <Link
                   href={link.href}
@@ -117,13 +141,25 @@ export function Navbar() {
             ))}
           </ul>
           <div className="mt-4 flex flex-col gap-2 border-t border-border pt-4">
-            <Link
-              href="/sign-in"
-              onClick={() => setMobileOpen(false)}
-              className="rounded-full px-3.5 py-2.5 text-center text-sm font-medium text-foreground-muted hover:bg-surface-muted"
-            >
-              Sign In
-            </Link>
+            {profile ? (
+              <form action={signOut}>
+                <button
+                  type="submit"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-full px-3.5 py-2.5 text-sm font-medium text-foreground-muted hover:bg-surface-muted"
+                >
+                  <LogOut className="h-4 w-4" aria-hidden="true" />
+                  Sign Out
+                </button>
+              </form>
+            ) : (
+              <Link
+                href="/sign-in"
+                onClick={() => setMobileOpen(false)}
+                className="rounded-full px-3.5 py-2.5 text-center text-sm font-medium text-foreground-muted hover:bg-surface-muted"
+              >
+                Sign In
+              </Link>
+            )}
             <CTAButton href="/report" size="md" className="w-full">
               Report a Problem
             </CTAButton>

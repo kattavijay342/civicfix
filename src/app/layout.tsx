@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
+import { getSessionProfile } from "@/lib/supabase/server";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -20,7 +21,9 @@ export const metadata: Metadata = {
     "CivicFix is an AI-powered civic issue reporting, routing, monitoring, and follow-up platform. Report a problem, let AI understand and route it to the right department, and track progress until resolution.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const session = await getSessionProfile();
+
   return (
     <html
       lang="en"
@@ -33,7 +36,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         >
           Skip to content
         </a>
-        <Navbar />
+        <Navbar profile={session?.profile ?? null} />
         <main id="main-content" className="flex-1">
           {children}
         </main>

@@ -1,6 +1,12 @@
 export type Priority = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 
-export type IssueStatus = "REPORTED" | "ASSIGNED" | "IN_PROGRESS" | "RESOLVED";
+export type IssueStatus =
+  | "REPORTED"
+  | "AI_ANALYZED"
+  | "ROUTED"
+  | "ACKNOWLEDGED"
+  | "IN_PROGRESS"
+  | "RESOLVED";
 
 export type ProblemCategory =
   | "ROAD"
@@ -91,6 +97,23 @@ export interface AIInsight {
   id: string;
   text: string;
   tone: "up" | "down" | "neutral";
+}
+
+export type UserRole = "citizen" | "government" | "department_incharge" | "admin";
+
+/** Row shape of public.profiles (see supabase/migrations/0001_init_schema.sql). */
+export interface Profile {
+  id: string;
+  role: UserRole;
+  full_name: string | null;
+  mobile_number: string | null;
+  gov_state: string | null;
+  gov_district: string | null;
+  gov_constituency: string | null;
+  gov_area: string | null;
+  department_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DuplicateGroup {

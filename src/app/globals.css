@@ -33,10 +33,14 @@
   /* Status scale */
   --color-status-reported: #64748b;
   --color-status-reported-bg: #f1f5f9;
-  --color-status-assigned: #7c3aed;
-  --color-status-assigned-bg: #f5f3ff;
-  --color-status-progress: #0891b2;
-  --color-status-progress-bg: #ecfeff;
+  --color-status-ai-analyzed: #7c3aed;
+  --color-status-ai-analyzed-bg: #f5f3ff;
+  --color-status-routed: #2563eb;
+  --color-status-routed-bg: #eff6ff;
+  --color-status-acknowledged: #0891b2;
+  --color-status-acknowledged-bg: #ecfeff;
+  --color-status-progress: #d97706;
+  --color-status-progress-bg: #fffbeb;
   --color-status-resolved: #1f7a51;
   --color-status-resolved-bg: #f0f9f3;
 }
@@ -71,8 +75,12 @@
 
   --color-status-reported: var(--color-status-reported);
   --color-status-reported-bg: var(--color-status-reported-bg);
-  --color-status-assigned: var(--color-status-assigned);
-  --color-status-assigned-bg: var(--color-status-assigned-bg);
+  --color-status-ai-analyzed: var(--color-status-ai-analyzed);
+  --color-status-ai-analyzed-bg: var(--color-status-ai-analyzed-bg);
+  --color-status-routed: var(--color-status-routed);
+  --color-status-routed-bg: var(--color-status-routed-bg);
+  --color-status-acknowledged: var(--color-status-acknowledged);
+  --color-status-acknowledged-bg: var(--color-status-acknowledged-bg);
   --color-status-progress: var(--color-status-progress);
   --color-status-progress-bg: var(--color-status-progress-bg);
   --color-status-resolved: var(--color-status-resolved);
