@@ -16,6 +16,8 @@ import { locationHeadline, locationBreakdown } from "@/lib/location-format";
 import { getReportDetail } from "@/lib/data/report-detail";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { RetryAnalysisButton } from "@/app/report/analysis/RetryAnalysisButton";
+import { FollowUpForm } from "@/components/report/FollowUpForm";
+import { DepartmentActionsPanel } from "@/components/report/DepartmentActionsPanel";
 import { cn } from "@/lib/utils";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -209,24 +211,33 @@ async function RealReportDetail({ id }: { id: string }) {
               )}
             </div>
 
-            {report.followUps.length > 0 && (
+            {(report.followUps.length > 0 ||
+              session?.profile.role === "government" ||
+              session?.profile.role === "admin") && (
               <div className="rounded-2xl border border-border bg-white p-6">
                 <h2 className="text-sm font-semibold text-foreground">Follow-ups</h2>
-                <ol className="mt-4 flex flex-col gap-4">
-                  {report.followUps.map((f, i) => (
-                    <li key={f.id} className="border-t border-border pt-4 first:border-t-0 first:pt-0">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">
-                        Follow-up #{report.followUps.length - i} · {formatDate(f.followUpDate)}
-                      </p>
-                      <p className="mt-1 text-sm text-foreground-muted">{f.notes}</p>
-                      {f.nextFollowUpDate && (
-                        <p className="mt-1 text-sm text-civic-700">
-                          <span className="font-semibold">Next follow-up:</span> {formatDate(f.nextFollowUpDate)}
+                {report.followUps.length > 0 ? (
+                  <ol className="mt-4 flex flex-col gap-4">
+                    {report.followUps.map((f, i) => (
+                      <li key={f.id} className="border-t border-border pt-4 first:border-t-0 first:pt-0">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">
+                          Follow-up #{report.followUps.length - i} · {formatDate(f.followUpDate)}
                         </p>
-                      )}
-                    </li>
-                  ))}
-                </ol>
+                        <p className="mt-1 text-sm text-foreground-muted">{f.notes}</p>
+                        {f.nextFollowUpDate && (
+                          <p className="mt-1 text-sm text-civic-700">
+                            <span className="font-semibold">Next follow-up:</span> {formatDate(f.nextFollowUpDate)}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="mt-3 text-sm text-foreground-muted">No follow-ups recorded yet.</p>
+                )}
+                {(session?.profile.role === "government" || session?.profile.role === "admin") && (
+                  <FollowUpForm reportId={report.id} />
+                )}
               </div>
             )}
 
@@ -277,6 +288,12 @@ async function RealReportDetail({ id }: { id: string }) {
                 <IssueTimeline status={report.status} />
               </div>
             </div>
+
+            {(session?.profile.role === "admin" ||
+              (session?.profile.role === "department_incharge" &&
+                session.profile.id === report.assignment?.inchargeId)) && (
+              <DepartmentActionsPanel reportId={report.id} status={report.status} />
+            )}
           </div>
         </div>
       </div>

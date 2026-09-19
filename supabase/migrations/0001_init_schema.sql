@@ -350,23 +350,7 @@ create trigger on_report_created
   after insert on public.reports
   for each row execute function public.handle_new_report();
 
--- Log every status transition automatically, in addition to whatever a
--- server action writes explicitly with human context (notes / changed_by).
-create or replace function public.handle_report_status_change()
-returns trigger
-language plpgsql
-security definer set search_path = public
-as $$
-begin
-  if old.status is distinct from new.status then
-    insert into public.status_history (report_id, old_status, new_status, changed_by, notes)
-    values (new.id, old.status, new.status, null, null);
-  end if;
-  return new;
-end;
-$$;
-
-drop trigger if exists on_report_status_change on public.reports;
-create trigger on_report_status_change
-  after update on public.reports
-  for each row execute function public.handle_report_status_change();
+-- No automatic per-update status_history trigger: every code path that
+-- changes reports.status (AI analysis, routing, department actions) writes
+-- its own status_history row with real notes/changed_by, so there is one
+-- row per transition instead of a duplicate blank one from a trigger.

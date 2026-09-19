@@ -6,6 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { analyzeReport, AIUnavailableError } from "@/lib/ai";
 import { findPossibleDuplicate } from "@/lib/duplicate-detection";
 import { resolveAssignment } from "@/lib/actions/routing";
+import { logStatusChange } from "@/lib/actions/status-history";
 import { categoryToDb, categoryFromDb } from "@/lib/db-enums";
 import { categoryLabels } from "@/lib/categories";
 import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
@@ -249,6 +250,7 @@ export async function createReport(
         status: "ai_analyzed",
       })
       .eq("id", reportId);
+    await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete");
 
     const assignment = await resolveAssignment(admin, category, location);
     if (assignment) {
@@ -259,6 +261,7 @@ export async function createReport(
         assignment_method: "auto",
       });
       await admin.from("reports").update({ status: "routed" }).eq("id", reportId);
+      await logStatusChange(admin, reportId, "ai_analyzed", "routed", null, "Routed to configured department");
     }
   } catch (err) {
     aiFailed = true;
@@ -336,6 +339,7 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
       .from("reports")
       .update({ severity: analysis.severity, priority: analysis.priority, status: "ai_analyzed" })
       .eq("id", reportId);
+    await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete (retry)");
 
     const assignment = await resolveAssignment(admin, category, location);
     if (assignment) {
@@ -346,6 +350,7 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
         assignment_method: "auto",
       });
       await admin.from("reports").update({ status: "routed" }).eq("id", reportId);
+      await logStatusChange(admin, reportId, "ai_analyzed", "routed", null, "Routed to configured department");
     }
 
     return {};

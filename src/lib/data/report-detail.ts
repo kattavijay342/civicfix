@@ -26,6 +26,7 @@ export interface ReportAiAnalysis {
 export interface ReportAssignment {
   departmentName: string;
   inchargeName: string | null;
+  inchargeId: string | null;
 }
 
 export interface FollowUpEntry {
@@ -154,7 +155,11 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail | 
         .maybeSingle();
       inchargeName = incharge?.full_name ?? "Authorized Government User";
     }
-    assignment = { departmentName: department?.name ?? "Unassigned", inchargeName };
+    assignment = {
+      departmentName: department?.name ?? "Unassigned",
+      inchargeName,
+      inchargeId: assignmentRes.data.incharge_id,
+    };
   }
 
   const followUpAuthorIds = [...new Set((followUpsRes.data ?? []).map((f) => f.government_user_id))];
