@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleDot, ClipboardList, Loader2, Route, Sparkles } from "lucide-react";
+import { CheckCircle2, CircleDot, ClipboardList, Loader2, Route, Sparkles, RotateCcw } from "lucide-react";
 import type { IssueStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +9,7 @@ export const statusLabels: Record<IssueStatus, string> = {
   ACKNOWLEDGED: "Acknowledged",
   IN_PROGRESS: "In Progress",
   RESOLVED: "Resolved",
+  REOPENED: "Reopened",
 };
 
 const config: Record<
@@ -50,6 +51,12 @@ const config: Record<
     text: "text-status-resolved",
     bg: "bg-status-resolved-bg",
     icon: CheckCircle2,
+  },
+  REOPENED: {
+    label: "Reopened",
+    text: "text-status-reopened",
+    bg: "bg-status-reopened-bg",
+    icon: RotateCcw,
   },
 };
 

@@ -35,7 +35,7 @@ export function CreateDepartmentForm() {
         Add department
       </button>
       {state.error && (
-        <p className="flex items-center gap-1.5 text-xs font-medium text-priority-critical">
+        <p role="alert" className="flex items-center gap-1.5 text-xs font-medium text-priority-critical">
           <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
           {state.error}
         </p>

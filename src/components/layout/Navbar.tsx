@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Menu, X, MapPinned, LogOut } from "lucide-react";
+import { Menu, X, MapPinned, LogOut, Bell } from "lucide-react";
 import { CTAButton } from "@/components/ui/CTAButton";
 import { cn } from "@/lib/utils";
 import { signOut } from "@/lib/actions/auth";
@@ -23,7 +23,7 @@ const roleLabels: Record<string, string> = {
   admin: "Admin",
 };
 
-export function Navbar({ profile }: { profile: Profile | null }) {
+export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; unreadCount?: number }) {
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const homeLink = profile
@@ -88,15 +88,29 @@ export function Navbar({ profile }: { profile: Profile | null }) {
 
         <div className="hidden items-center gap-2 lg:flex">
           {profile ? (
-            <form action={signOut}>
-              <button
-                type="submit"
-                className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
+            <>
+              <Link
+                href="/notifications"
+                aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+                className="relative inline-flex h-10 w-10 items-center justify-center rounded-full text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
               >
-                <LogOut className="h-4 w-4" aria-hidden="true" />
-                Sign Out
-              </button>
-            </form>
+                <Bell className="h-4.5 w-4.5" aria-hidden="true" />
+                {unreadCount > 0 && (
+                  <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </Link>
+              <form action={signOut}>
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
+                >
+                  <LogOut className="h-4 w-4" aria-hidden="true" />
+                  Sign Out
+                </button>
+              </form>
+            </>
           ) : (
             <Link
               href="/sign-in"
@@ -142,15 +156,30 @@ export function Navbar({ profile }: { profile: Profile | null }) {
           </ul>
           <div className="mt-4 flex flex-col gap-2 border-t border-border pt-4">
             {profile ? (
-              <form action={signOut}>
-                <button
-                  type="submit"
+              <>
+                <Link
+                  href="/notifications"
+                  onClick={() => setMobileOpen(false)}
                   className="flex w-full items-center justify-center gap-1.5 rounded-full px-3.5 py-2.5 text-sm font-medium text-foreground-muted hover:bg-surface-muted"
                 >
-                  <LogOut className="h-4 w-4" aria-hidden="true" />
-                  Sign Out
-                </button>
-              </form>
+                  <Bell className="h-4 w-4" aria-hidden="true" />
+                  Notifications
+                  {unreadCount > 0 && (
+                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
+                      {unreadCount > 9 ? "9+" : unreadCount}
+                    </span>
+                  )}
+                </Link>
+                <form action={signOut}>
+                  <button
+                    type="submit"
+                    className="flex w-full items-center justify-center gap-1.5 rounded-full px-3.5 py-2.5 text-sm font-medium text-foreground-muted hover:bg-surface-muted"
+                  >
+                    <LogOut className="h-4 w-4" aria-hidden="true" />
+                    Sign Out
+                  </button>
+                </form>
+              </>
             ) : (
               <Link
                 href="/sign-in"

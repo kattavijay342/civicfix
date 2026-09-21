@@ -2,7 +2,9 @@ import "server-only";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { categoryFromDb, priorityFromDb, statusFromDb } from "@/lib/db-enums";
+import { aiAnalysisExtendedSchema, type AIAnalysisExtended } from "@/lib/ai";
 import type { CivicLocation, IssueStatus, Priority, ProblemCategory } from "@/lib/types";
+import type { DuplicateRelationType } from "@/lib/duplicate-detection";
 
 export interface ReportMedia {
   id: string;
@@ -21,6 +23,10 @@ export interface ReportAiAnalysis {
   recommendedAction: string;
   confidence: number;
   model: string;
+  /** Phase 6A extras — null for reports analyzed before this migration, or
+   * if the stored JSON somehow fails re-validation (never trust it blindly
+   * even though it was written by our own Zod-validated insert). */
+  extended: AIAnalysisExtended | null;
 }
 
 export interface ReportAssignment {
@@ -43,6 +49,12 @@ export interface StatusHistoryEntry {
   newStatus: IssueStatus;
   notes: string | null;
   createdAt: string;
+  /** Who made this transition — null for system-driven transitions
+   * (AI_ANALYZED/ROUTED, logged with changed_by: null in reports.ts).
+   * Compare against reporterId to label an event "You" vs "Department"
+   * (see RealStatusTimeline) — never resolved to a name here, so a citizen
+   * viewing their own report never sees another user's identity. */
+  changedBy: string | null;
 }
 
 export interface ResolutionEvidenceEntry {
@@ -50,6 +62,16 @@ export interface ResolutionEvidenceEntry {
   afterUrl: string | null;
   notes: string;
   resolvedAt: string;
+}
+
+/** Phase 6D — the original reporter's own confirmation signal on a
+ * resolution. A citizen-reported signal only, never an official government
+ * verification (see src/lib/citizen-summary.ts). */
+export interface ResolutionFeedbackEntry {
+  confirmed: boolean;
+  comment: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ReportDetail {
@@ -70,7 +92,26 @@ export interface ReportDetail {
   followUps: FollowUpEntry[];
   statusHistory: StatusHistoryEntry[];
   resolutionEvidence: ResolutionEvidenceEntry | null;
-  duplicateOf: { id: string; title: string } | null;
+  duplicateOf: {
+    id: string;
+    title: string;
+    category: ProblemCategory;
+    status: IssueStatus;
+    location: CivicLocation;
+    relationType: DuplicateRelationType;
+    reason: string | null;
+  } | null;
+  resolutionFeedback: ResolutionFeedbackEntry | null;
+  reopenedAt: string | null;
+}
+
+/** Re-validates the stored `extended` JSONB against the same Zod schema
+ * used on write (src/lib/ai.ts) — defends against a row written before this
+ * schema existed (null), a hand-edited row, or a future schema change. */
+function parseExtended(raw: unknown): AIAnalysisExtended | null {
+  if (!raw) return null;
+  const result = aiAnalysisExtendedSchema.safeParse(raw);
+  return result.success ? result.data : null;
 }
 
 function toCivicLocation(row: {
@@ -86,6 +127,7 @@ function toCivicLocation(row: {
   address: string | null;
   latitude: number | null;
   longitude: number | null;
+  accuracy_meters?: number | null;
   location_source: string;
 }): CivicLocation {
   return {
@@ -100,6 +142,7 @@ function toCivicLocation(row: {
     address: row.address ?? undefined,
     latitude: row.latitude,
     longitude: row.longitude,
+    accuracy: row.accuracy_meters ?? null,
     source: (row.location_source as CivicLocation["source"]) ?? "manual",
   };
 }
@@ -117,7 +160,7 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail | 
 
   const admin = createAdminClient();
 
-  const [locationRes, mediaRes, aiRes, assignmentRes, followUpsRes, historyRes, resolutionRes, duplicateRes] =
+  const [locationRes, mediaRes, aiRes, assignmentRes, followUpsRes, historyRes, resolutionRes, duplicateRes, feedbackRes] =
     await Promise.all([
       admin.from("report_locations").select("*").eq("report_id", reportId).maybeSingle(),
       admin.from("report_media").select("*").eq("report_id", reportId),
@@ -126,18 +169,28 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail | 
       admin.from("follow_ups").select("*").eq("report_id", reportId).order("follow_up_date", { ascending: false }),
       admin.from("status_history").select("*").eq("report_id", reportId).order("created_at", { ascending: true }),
       admin.from("resolution_evidence").select("*").eq("report_id", reportId).maybeSingle(),
-      admin.from("report_duplicate_flags").select("possible_duplicate_of").eq("report_id", reportId).maybeSingle(),
+      admin
+        .from("report_duplicate_flags")
+        .select("possible_duplicate_of, relation_type, reason")
+        .eq("report_id", reportId)
+        .maybeSingle(),
+      // Not yet present pre-migration-0012 environments — .maybeSingle()
+      // returning an error there just leaves resolutionFeedback null below,
+      // it never breaks the rest of this read (same defensive pattern used
+      // throughout Phase 6B/6C for newly-added columns/tables).
+      admin.from("resolution_feedback").select("*").eq("report_id", reportId).maybeSingle(),
     ]);
 
   const location: CivicLocation = locationRes.data
     ? toCivicLocation(locationRes.data)
     : { displayName: "Location not recorded", source: "manual" };
 
-  const media: ReportMedia[] = [];
-  for (const m of mediaRes.data ?? []) {
-    const { data: signed } = await admin.storage.from("report-media").createSignedUrl(m.file_path, 3600);
-    media.push({ id: m.id, kind: m.kind, url: signed?.signedUrl ?? null, mimeType: m.mime_type });
-  }
+  const media: ReportMedia[] = await Promise.all(
+    (mediaRes.data ?? []).map(async (m) => {
+      const { data: signed } = await admin.storage.from("report-media").createSignedUrl(m.file_path, 900);
+      return { id: m.id, kind: m.kind, url: signed?.signedUrl ?? null, mimeType: m.mime_type };
+    })
+  );
 
   let assignment: ReportAssignment | null = null;
   if (assignmentRes.data) {
@@ -169,14 +222,27 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail | 
     for (const a of authors ?? []) authorNameById.set(a.id, a.full_name);
   }
 
-  let duplicateOf: { id: string; title: string } | null = null;
+  // Only ever public-safe fields of the OTHER report (title/category/status/
+  // location — all already shown for any report on this same detail page,
+  // and already surfaced pre-submission by DuplicateIssueCard) — never that
+  // report's reporter identity, media, or any other citizen's private data.
+  let duplicateOf: ReportDetail["duplicateOf"] = null;
   if (duplicateRes.data?.possible_duplicate_of) {
-    const { data: dup } = await admin
-      .from("reports")
-      .select("id, title")
-      .eq("id", duplicateRes.data.possible_duplicate_of)
-      .maybeSingle();
-    if (dup) duplicateOf = dup;
+    const [{ data: dup }, { data: dupLocation }] = await Promise.all([
+      admin.from("reports").select("id, title, category, status").eq("id", duplicateRes.data.possible_duplicate_of).maybeSingle(),
+      admin.from("report_locations").select("*").eq("report_id", duplicateRes.data.possible_duplicate_of).maybeSingle(),
+    ]);
+    if (dup) {
+      duplicateOf = {
+        id: dup.id,
+        title: dup.title,
+        category: categoryFromDb[dup.category],
+        status: statusFromDb[dup.status],
+        location: dupLocation ? toCivicLocation(dupLocation) : { displayName: "Location not recorded", source: "manual" },
+        relationType: (duplicateRes.data.relation_type as DuplicateRelationType) ?? "duplicate",
+        reason: duplicateRes.data.reason ?? null,
+      };
+    }
   }
 
   let resolutionEvidence: ResolutionEvidenceEntry | null = null;
@@ -219,6 +285,7 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail | 
           recommendedAction: aiRes.data.recommended_action,
           confidence: Number(aiRes.data.confidence),
           model: aiRes.data.model,
+          extended: parseExtended(aiRes.data.extended),
         }
       : null,
     assignment,
@@ -235,8 +302,18 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail | 
       newStatus: statusFromDb[h.new_status],
       notes: h.notes,
       createdAt: h.created_at,
+      changedBy: h.changed_by,
     })),
     resolutionEvidence,
     duplicateOf,
+    resolutionFeedback: feedbackRes.data
+      ? {
+          confirmed: feedbackRes.data.confirmed,
+          comment: feedbackRes.data.comment,
+          createdAt: feedbackRes.data.created_at,
+          updatedAt: feedbackRes.data.updated_at,
+        }
+      : null,
+    reopenedAt: report.reopened_at ?? null,
   };
 }

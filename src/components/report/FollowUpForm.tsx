@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { addFollowUp, type FollowUpFormState } from "@/lib/actions/follow-up";
 
@@ -13,18 +13,40 @@ export function FollowUpForm({ reportId }: { reportId: string }) {
   const action = addFollowUp.bind(null, reportId);
   const [state, formAction, pending] = useActionState(action, initialState);
 
+  // Stable across an accidental double-submit of the same attempt, but
+  // regenerated after a successful save so the next follow-up doesn't
+  // replay this one's cached result (Step 9: idempotency). Rotated during
+  // render (React's documented "adjust state while rendering" pattern)
+  // rather than in an Effect, so it updates in the same commit as `state`
+  // instead of one render later.
+  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
+  const [handledState, setHandledState] = useState(state);
+  if (state !== handledState) {
+    setHandledState(state);
+    if (state.success) setIdempotencyKey(crypto.randomUUID());
+  }
+
   return (
     <form action={formAction} className="mt-4 flex flex-col gap-3 border-t border-border pt-4">
+      <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <label className="flex flex-col gap-1.5">
         <span className="text-xs font-medium text-foreground-muted">Follow-up notes</span>
-        <textarea name="notes" rows={2} required className={inputClasses} placeholder="e.g. Called the department, they confirmed a site visit." />
+        <textarea
+          name="notes"
+          rows={2}
+          required
+          className={inputClasses}
+          placeholder="e.g. Called the department, they confirmed a site visit."
+          aria-invalid={!!state.error}
+          aria-describedby={state.error ? "followup-form-error" : undefined}
+        />
       </label>
       <label className="flex flex-col gap-1.5">
         <span className="text-xs font-medium text-foreground-muted">Next follow-up date (optional)</span>
         <input type="date" name="nextFollowUpDate" className={inputClasses} />
       </label>
       {state.error && (
-        <p className="flex items-center gap-1.5 text-xs font-medium text-priority-critical">
+        <p id="followup-form-error" role="alert" className="flex items-center gap-1.5 text-xs font-medium text-priority-critical">
           <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           {state.error}
         </p>

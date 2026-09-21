@@ -5,10 +5,10 @@ import { ErrorState } from "@/components/ui/ErrorState";
 
 export default function RootError({
   error,
-  retry,
+  reset,
 }: {
   error: Error & { digest?: string };
-  retry: () => void;
+  reset: () => void;
 }) {
   useEffect(() => {
     console.error(error);
@@ -19,7 +19,7 @@ export default function RootError({
       <ErrorState
         title="Something went wrong"
         description="An unexpected error occurred. You can try again, or come back later."
-        onRetry={retry}
+        onRetry={reset}
       />
     </div>
   );

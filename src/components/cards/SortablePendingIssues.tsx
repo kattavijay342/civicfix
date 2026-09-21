@@ -40,7 +40,7 @@ export function SortablePendingIssues({ issues }: { issues: CivicIssue[] }) {
             type="button"
             onClick={() => setSortMode(opt.mode)}
             className={cn(
-              "rounded-full border px-3 py-1.5 text-xs font-medium transition",
+              "min-h-10 rounded-full border px-3.5 py-2 text-xs font-medium transition",
               sortMode === opt.mode
                 ? "border-civic-300 bg-civic-50 text-civic-700"
                 : "border-border bg-white text-foreground-muted hover:border-civic-200 hover:text-foreground",

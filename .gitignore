@@ -36,6 +36,15 @@ yarn-error.log*
 # vercel
 .vercel
 
+# supabase CLI local cache (machine-specific, not project source)
+/supabase/.temp
+
 # typescript
 *.tsbuildinfo
+
+# playwright (Phase 4 Step 10 E2E) — saved sign-in session and run artifacts
+/e2e/.auth
+/test-results
+/playwright-report
+/blob-report
 next-env.d.ts

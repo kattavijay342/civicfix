@@ -57,7 +57,7 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
   const stats = hasFilter ? computeStats(filteredIssues) : null;
 
   const selectClass =
-    "rounded-lg border border-border bg-white px-3 py-2 text-xs font-medium text-foreground focus-visible:border-civic-400 disabled:cursor-not-allowed disabled:opacity-50";
+    "min-h-10 rounded-lg border border-border bg-white px-3 py-2 text-xs font-medium text-foreground focus-visible:border-civic-400 disabled:cursor-not-allowed disabled:opacity-50";
 
   return (
     <div>
@@ -139,7 +139,7 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
                 setConstituency("");
                 setArea("");
               }}
-              className="rounded-lg px-3 py-2 text-xs font-medium text-civic-700 hover:bg-civic-50"
+              className="min-h-10 rounded-lg px-3 py-2 text-xs font-medium text-civic-700 hover:bg-civic-50"
             >
               Clear
             </button>
@@ -147,8 +147,8 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
         </div>
         <p className="mt-3 text-[11px] text-foreground-muted">
           {hasFilter
-            ? `Showing sample issues matching ${[area, constituency, district, state].filter(Boolean).join(", ")}.`
-            : "Demo jurisdiction list for Andhra Pradesh and Telangana only — select a state to filter issues by area."}
+            ? `Showing issues matching ${[area, constituency, district, state].filter(Boolean).join(", ")}.`
+            : "State/district/constituency/area list is a demo dataset for Andhra Pradesh and Telangana only — select a state to filter your real issues by area."}
         </p>
       </div>
 
@@ -182,8 +182,8 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
       </div>
       {hasFilter && (
         <p className="mt-2 text-[11px] text-foreground-muted">
-          Computed from {filteredIssues.length} sample issue{filteredIssues.length === 1 ? "" : "s"} in this
-          area — not a live jurisdiction-wide aggregate.
+          Computed from {filteredIssues.length} issue{filteredIssues.length === 1 ? "" : "s"} matching this
+          area filter — not your full jurisdiction-wide aggregate above.
         </p>
       )}
 
@@ -197,8 +197,8 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
               title="No pending issues for this area"
               description={
                 hasFilter
-                  ? "No sample issues match this jurisdiction filter. Try a broader area or clear the filter."
-                  : "There are currently no pending issues in the sample data."
+                  ? "No issues match this jurisdiction filter. Try a broader area or clear the filter."
+                  : "There are currently no pending issues in your jurisdiction."
               }
             />
           )}

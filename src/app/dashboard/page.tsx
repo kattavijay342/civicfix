@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { ListChecks, AlertTriangle, Loader2, CheckCircle2, ArrowRight, FileEdit } from "lucide-react";
 import { DashboardStat } from "@/components/cards/DashboardStat";
@@ -80,9 +81,9 @@ export default async function CitizenDashboardPage() {
           <div className="min-w-0 rounded-2xl border border-border bg-white p-6 lg:col-span-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-sm font-semibold text-foreground">Recent Reports</h2>
-              <a href="/dashboard/reports" className="text-xs font-medium text-civic-700 hover:underline">
+              <Link href="/dashboard/reports" className="text-xs font-medium text-civic-700 hover:underline">
                 View all
-              </a>
+              </Link>
             </div>
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               {issues.slice(0, 4).map((issue) => (

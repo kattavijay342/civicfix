@@ -20,29 +20,35 @@
   --color-civic-800: #184e37;
   --color-civic-900: #14402f;
 
-  /* Priority scale */
+  /* Priority scale — text tones darkened to meet WCAG AA (4.5:1) against
+     their light backgrounds at badge text sizes (text-xs font-semibold). */
   --color-priority-critical: #dc2626;
   --color-priority-critical-bg: #fef2f2;
-  --color-priority-high: #ea580c;
+  --color-priority-high: #c2410c;
   --color-priority-high-bg: #fff7ed;
-  --color-priority-medium: #ca8a04;
+  --color-priority-medium: #854d0e;
   --color-priority-medium-bg: #fefce8;
-  --color-priority-low: #2563eb;
+  --color-priority-low: #1d4ed8;
   --color-priority-low-bg: #eff6ff;
 
-  /* Status scale */
-  --color-status-reported: #64748b;
+  /* Status scale — same AA-contrast pass as the priority scale above. */
+  --color-status-reported: #334155;
   --color-status-reported-bg: #f1f5f9;
   --color-status-ai-analyzed: #7c3aed;
   --color-status-ai-analyzed-bg: #f5f3ff;
-  --color-status-routed: #2563eb;
+  --color-status-routed: #1d4ed8;
   --color-status-routed-bg: #eff6ff;
-  --color-status-acknowledged: #0891b2;
+  --color-status-acknowledged: #0e7490;
   --color-status-acknowledged-bg: #ecfeff;
-  --color-status-progress: #d97706;
+  --color-status-progress: #92400e;
   --color-status-progress-bg: #fffbeb;
   --color-status-resolved: #1f7a51;
   --color-status-resolved-bg: #f0f9f3;
+  /* Phase 6D — a resolved report the citizen says isn't actually fixed;
+     deliberately distinct from both "resolved" (green) and "in progress"
+     (amber) so it reads as "needs attention again," not routine progress. */
+  --color-status-reopened: #b91c1c;
+  --color-status-reopened-bg: #fef2f2;
 }
 
 @theme inline {
@@ -85,6 +91,8 @@
   --color-status-progress-bg: var(--color-status-progress-bg);
   --color-status-resolved: var(--color-status-resolved);
   --color-status-resolved-bg: var(--color-status-resolved-bg);
+  --color-status-reopened: var(--color-status-reopened);
+  --color-status-reopened-bg: var(--color-status-reopened-bg);
 
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
@@ -161,4 +169,36 @@ body {
   outline: 2px solid var(--color-civic-600);
   outline-offset: 2px;
   border-radius: 4px;
+}
+
+/*
+ * Mapbox GL overrides — mapbox-gl.css ships its own chrome (popups, controls,
+ * attribution) that can't be reached with Tailwind utility classes since
+ * they're mapbox's own DOM nodes, not ours. This keeps that chrome in line
+ * with CivicFix's rounded-card, light SaaS look instead of the stock Mapbox
+ * demo styling. The popup's own inner content is still built and styled by
+ * CivicMapView itself with ordinary Tailwind classes.
+ */
+.civic-mapbox canvas {
+  border-radius: inherit;
+}
+.mapboxgl-popup-content {
+  border-radius: 0.75rem;
+  padding: 0.875rem 1rem;
+  box-shadow: 0 10px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  border: 1px solid var(--border);
+}
+.mapboxgl-popup-close-button {
+  font-size: 1rem;
+  color: var(--foreground-muted);
+  padding: 0.25rem 0.5rem;
+}
+.mapboxgl-ctrl-group {
+  border-radius: 0.5rem !important;
+  overflow: hidden;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1) !important;
+}
+.mapboxgl-popup-tip {
+  border-top-color: #ffffff !important;
+  border-bottom-color: #ffffff !important;
 }

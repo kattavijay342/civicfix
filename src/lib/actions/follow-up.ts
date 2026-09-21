@@ -3,6 +3,9 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { checkRateLimit, retryAfterMessage } from "@/lib/rate-limit";
+import { beginIdempotentAction } from "@/lib/idempotency";
+import { createNotification } from "@/lib/notifications/create";
 
 export interface FollowUpFormState {
   error?: string;
@@ -28,8 +31,11 @@ export async function addFollowUp(
   }
 
   // RLS-gated visibility check: report_in_my_jurisdiction / admin.
-  const { data: report } = await supabase.from("reports").select("id").eq("id", reportId).maybeSingle();
+  const { data: report } = await supabase.from("reports").select("id, title").eq("id", reportId).maybeSingle();
   if (!report) return { error: "Report not found." };
+
+  const rateLimit = await checkRateLimit(`add_follow_up:${user.id}`, 30, 60 * 60);
+  if (!rateLimit.allowed) return { error: retryAfterMessage(rateLimit.retryAfterSeconds) };
 
   const notes = String(formData.get("notes") ?? "").trim();
   const nextFollowUpDate = String(formData.get("nextFollowUpDate") ?? "").trim() || null;
@@ -42,6 +48,14 @@ export async function addFollowUp(
   }
 
   const admin = createAdminClient();
+
+  const clientKey = String(formData.get("idempotencyKey") ?? "").trim() || null;
+  const idempotency = await beginIdempotentAction<FollowUpFormState>(admin, user.id, "add_follow_up", clientKey);
+  if (idempotency.kind === "replay") return idempotency.result;
+  if (idempotency.kind === "in_progress") {
+    return { error: "This follow-up is already being saved. Please wait a moment." };
+  }
+
   const { error } = await admin.from("follow_ups").insert({
     report_id: reportId,
     government_user_id: user.id,
@@ -49,10 +63,29 @@ export async function addFollowUp(
     next_follow_up_date: nextFollowUpDate,
   });
 
-  if (error) {
-    return { error: "Unable to save the follow-up. Please try again." };
-  }
+  const result: FollowUpFormState = error
+    ? { error: "Unable to save the follow-up. Please try again." }
+    : { success: true };
 
-  revalidatePath(`/reports/${reportId}`);
-  return { success: true };
+  if (error) await idempotency.release();
+  else await idempotency.commit(result);
+
+  if (!error) {
+    const { data: assignment } = await admin
+      .from("report_assignments")
+      .select("incharge_id")
+      .eq("report_id", reportId)
+      .maybeSingle();
+    if (assignment?.incharge_id) {
+      await createNotification(admin, {
+        recipientId: assignment.incharge_id,
+        type: "follow_up_recorded",
+        title: "Government follow-up recorded",
+        body: `A follow-up note was recorded on "${report.title}": ${notes}`,
+        relatedReportId: reportId,
+      });
+    }
+    revalidatePath(`/reports/${reportId}`);
+  }
+  return result;
 }

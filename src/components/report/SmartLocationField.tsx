@@ -1,9 +1,15 @@
 "use client";
 
-import { useMemo, useRef, useState, type PointerEvent } from "react";
+import { useMemo, useState } from "react";
 import { MapPin, LocateFixed, Navigation, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { stateNames, getDistricts, getConstituencies, getAreas } from "@/lib/jurisdiction";
 import { locationBreakdown } from "@/lib/location-format";
+import { classifyGeolocationError, describeGeolocationFailure, GEOLOCATION_OPTIONS } from "@/lib/location/gps";
+import { sanitizeCoordinates } from "@/lib/location/validation";
+import { attemptReverseGeocode } from "@/lib/actions/location";
+import { LocationSearchBox } from "@/components/report/LocationSearchBox";
+import { CivicMap } from "@/components/map/CivicMap";
+import type { LocationSearchSuggestion } from "@/lib/location/types";
 import type { CivicLocation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -13,7 +19,7 @@ interface SmartLocationFieldProps {
   error?: string;
 }
 
-type PinSource = "gps" | "manual" | null;
+type PinSource = "gps" | "manual" | "search" | null;
 
 const secondaryBtn =
   "inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60";
@@ -32,14 +38,16 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   const [pinSource, setPinSource] = useState<PinSource>(null);
-  const [pinPercent, setPinPercent] = useState<{ x: number; y: number } | null>(null);
+  const [pinCoords, setPinCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [pinConfirmed, setPinConfirmed] = useState(false);
-  const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [flyToKey, setFlyToKey] = useState<string | undefined>(undefined);
+  const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number; accuracy: number | null } | null>(null);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [gpsNote, setGpsNote] = useState<string | null>(null);
-
-  const mapRef = useRef<HTMLDivElement>(null);
-  const draggingRef = useRef(false);
+  // Phase 6B: reverse geocoding is wired in for real (src/lib/actions/location.ts)
+  // against Mapbox — see src/lib/location/reverse-geocoding.ts.
+  const [addressNote, setAddressNote] = useState<string | null>(null);
+  const [addressLookupPending, setAddressLookupPending] = useState(false);
 
   const districtOptions = useMemo(() => getDistricts(state), [state]);
   const constituencyOptions = useMemo(() => getConstituencies(state, district), [state, district]);
@@ -73,10 +81,14 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
     }
 
     const displayName = l.trim() ? `${l.trim()}, ${a}` : `${a}, ${c}`;
-    const lat =
-      "latitude" in overrides ? overrides.latitude! : pinSource === "gps" && gpsCoords ? gpsCoords.lat : null;
-    const lng =
-      "longitude" in overrides ? overrides.longitude! : pinSource === "gps" && gpsCoords ? gpsCoords.lng : null;
+    const rawLat = "latitude" in overrides ? overrides.latitude! : (pinCoords?.lat ?? null);
+    const rawLng = "longitude" in overrides ? overrides.longitude! : (pinCoords?.lng ?? null);
+    // Never trust an unvalidated coordinate into the report, and never fall
+    // back to a fake default like (0, 0) — an invalid pair is simply null.
+    const sanitized =
+      rawLat != null && rawLng != null
+        ? sanitizeCoordinates(rawLat, rawLng, pinSource === "gps" ? gpsCoords?.accuracy : null)
+        : null;
 
     onChange({
       displayName,
@@ -85,9 +97,10 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
       constituency: c,
       area: a,
       landmark: l.trim() || undefined,
-      latitude: lat,
-      longitude: lng,
-      source: pinSource === "gps" && lat != null && lng != null ? "gps" : "manual",
+      latitude: sanitized?.latitude ?? null,
+      longitude: sanitized?.longitude ?? null,
+      accuracy: sanitized?.accuracy ?? null,
+      source: sanitized ? (pinSource === "gps" ? "gps" : pinSource === "search" ? "search" : "manual") : "manual",
     });
   }
 
@@ -128,82 +141,100 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
     if (jurisdictionReady) emitLocation({ landmark: next });
   }
 
-  function pinFromPointer(clientX: number, clientY: number) {
-    const box = mapRef.current;
-    if (!box) return null;
-    const rect = box.getBoundingClientRect();
-    const x = Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
-    const y = Math.min(100, Math.max(0, ((clientY - rect.top) / rect.height) * 100));
-    return { x, y };
+  /** Fired for both a click and a drag-end on the map's single marker — a
+   * real map, real coordinates, no percentage-based fake positioning. Any
+   * hands-on placement/adjustment on the map itself is "manual," even if the
+   * marker started out from a GPS fix or search result. */
+  function handleMapMove(lat: number, lng: number) {
+    const sanitized = sanitizeCoordinates(lat, lng, null);
+    if (!sanitized) return;
+    setPinSource("manual");
+    setPinCoords({ lat: sanitized.latitude, lng: sanitized.longitude });
+    setPinConfirmed(false);
+    setGpsCoords(null);
+    setAddressNote(null);
   }
 
   function startManualPin() {
     setGpsCoords(null);
     setGpsNote(null);
-    setPinSource("manual");
+    setAddressNote(null);
+    setPinSource(null);
+    setPinCoords(null);
     setPinConfirmed(false);
-    setPinPercent((p) => p ?? { x: 50, y: 50 });
   }
 
-  function handleMapPointerDown(e: PointerEvent<HTMLDivElement>) {
-    const pos = pinFromPointer(e.clientX, e.clientY);
-    if (!pos) return;
-    setPinSource("manual");
-    setPinConfirmed(false);
+  function handleSearchSelect(suggestion: LocationSearchSuggestion) {
     setGpsCoords(null);
-    setPinPercent(pos);
-    draggingRef.current = true;
-    (e.target as Element).setPointerCapture?.(e.pointerId);
-  }
-
-  function handleMapPointerMove(e: PointerEvent<HTMLDivElement>) {
-    if (!draggingRef.current) return;
-    const pos = pinFromPointer(e.clientX, e.clientY);
-    if (pos) setPinPercent(pos);
-  }
-
-  function endMapDrag() {
-    draggingRef.current = false;
+    setGpsNote(null);
+    setPinSource("search");
+    setPinCoords({ lat: suggestion.latitude, lng: suggestion.longitude });
+    setPinConfirmed(false);
+    setFlyToKey(String(Date.now()));
+    setAddressNote(suggestion.context ? `${suggestion.label}, ${suggestion.context}` : suggestion.label);
+    // Never overwrite something the citizen already typed themselves — only
+    // fill the free-text landmark field when it's still empty.
+    if (!landmark.trim()) handleLandmarkChange(suggestion.label);
   }
 
   function handleUseCurrentLocation() {
+    if (gpsLoading) return; // defensive guard alongside the disabled button
     if (!("geolocation" in navigator)) {
-      setGpsNote("Location access was not available. You can select the location manually on the map.");
+      setGpsNote(describeGeolocationFailure("unsupported"));
       return;
     }
     setGpsLoading(true);
     setGpsNote(null);
+    setAddressNote(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setGpsCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        const sanitized = sanitizeCoordinates(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
+        if (!sanitized) {
+          setGpsNote(describeGeolocationFailure("position_unavailable"));
+          setGpsLoading(false);
+          return;
+        }
+        setGpsCoords({ lat: sanitized.latitude, lng: sanitized.longitude, accuracy: sanitized.accuracy });
+        setPinCoords({ lat: sanitized.latitude, lng: sanitized.longitude });
         setPinSource("gps");
-        setPinPercent({ x: 50, y: 50 });
         setPinConfirmed(false);
         setGpsLoading(false);
+        setFlyToKey(String(Date.now()));
+
+        // Fire-and-forget: attempts real reverse geocoding through Mapbox
+        // (src/lib/location/reverse-geocoding.ts) exactly once per confirmed
+        // fix, never repeated for the same coordinates.
+        setAddressLookupPending(true);
+        attemptReverseGeocode(sanitized.latitude, sanitized.longitude)
+          .then((outcome) => {
+            setAddressNote(
+              outcome.status === "ok"
+                ? outcome.result.formattedAddress
+                : "Address lookup unavailable — please confirm the location manually using the fields above."
+            );
+          })
+          .finally(() => setAddressLookupPending(false));
       },
-      () => {
-        setGpsNote("Location access was not available. You can select the location manually on the map.");
+      (error) => {
+        setGpsNote(describeGeolocationFailure(classifyGeolocationError(error)));
         setGpsLoading(false);
       },
-      { timeout: 8000 },
+      GEOLOCATION_OPTIONS
     );
   }
 
   function confirmPin() {
     setPinConfirmed(true);
-    if (pinSource === "gps" && gpsCoords) {
-      emitLocation({ latitude: gpsCoords.lat, longitude: gpsCoords.lng });
-    } else {
-      emitLocation({ latitude: null, longitude: null });
-    }
+    if (pinCoords) emitLocation({ latitude: pinCoords.lat, longitude: pinCoords.lng });
   }
 
   function resetPin() {
     setPinSource(null);
-    setPinPercent(null);
+    setPinCoords(null);
     setPinConfirmed(false);
     setGpsCoords(null);
     setGpsNote(null);
+    setAddressNote(null);
     emitLocation({ latitude: null, longitude: null });
   }
 
@@ -341,52 +372,29 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
 
       <div className="mt-5 border-t border-border pt-5">
         <p className="text-xs font-semibold text-foreground">Pinpoint the exact location</p>
-        <p className="mt-0.5 text-xs text-foreground-muted">Confirm where the problem is located.</p>
+        <p className="mt-0.5 text-xs text-foreground-muted">
+          Search for a place, use your current location, or drag the pin on the map.
+        </p>
 
-        <div
-          ref={mapRef}
-          onPointerDown={handleMapPointerDown}
-          onPointerMove={handleMapPointerMove}
-          onPointerUp={endMapDrag}
-          onPointerLeave={endMapDrag}
-          className="relative mt-3 aspect-[16/9] touch-none select-none overflow-hidden rounded-xl border border-border bg-[#eef3ee]"
-        >
-          <svg className="pointer-events-none absolute inset-0 h-full w-full opacity-60" aria-hidden="true">
-            <defs>
-              <pattern id="loc-map-grid" width="32" height="32" patternUnits="userSpaceOnUse">
-                <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#d5ded5" strokeWidth="1" />
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#loc-map-grid)" />
-          </svg>
-          <svg className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
-            <path
-              d="M0,90 C120,60 220,120 360,80 C440,55 520,100 640,70"
-              fill="none"
-              stroke="#c9d4c9"
-              strokeWidth="8"
-            />
-            <path d="M90,0 C120,90 80,180 130,260" fill="none" stroke="#c9d4c9" strokeWidth="6" />
-          </svg>
+        <div className="mt-3">
+          <LocationSearchBox onSelect={handleSearchSelect} />
+        </div>
 
-          {!pinPercent && (
-            <p className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center text-xs text-foreground-muted">
-              Tap or drag to place a pin — or use the buttons below.
+        <div className="relative mt-3 aspect-[16/9] overflow-hidden rounded-xl border border-border">
+          <CivicMap
+            mode="single"
+            singleMarker={pinCoords ? { latitude: pinCoords.lat, longitude: pinCoords.lng } : null}
+            draggable
+            onSingleMarkerMove={handleMapMove}
+            flyToKey={flyToKey}
+            center={pinCoords ? [pinCoords.lng, pinCoords.lat] : undefined}
+            zoom={pinCoords ? 15 : undefined}
+          />
+          {!pinCoords && (
+            <p className="pointer-events-none absolute inset-x-6 top-1/2 -translate-y-1/2 text-center text-xs text-foreground-muted">
+              Search above, use your current location, or tap the map to place a pin.
             </p>
           )}
-
-          {pinPercent && (
-            <div
-              className="absolute flex h-7 w-7 -translate-x-1/2 -translate-y-full cursor-grab items-center justify-center rounded-full border-2 border-white bg-civic-600 text-white shadow-md active:cursor-grabbing"
-              style={{ left: `${pinPercent.x}%`, top: `${pinPercent.y}%` }}
-            >
-              <MapPin className="h-4 w-4" aria-hidden="true" />
-            </div>
-          )}
-
-          <span className="absolute left-2.5 top-2.5 rounded-full bg-black/55 px-2 py-0.5 text-[10px] font-medium text-white">
-            Demo map
-          </span>
         </div>
 
         <div className="mt-3 flex flex-wrap gap-2">
@@ -415,14 +423,37 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
           </button>
         </div>
 
-        {gpsNote && <p className="mt-2 text-xs text-priority-medium">{gpsNote}</p>}
+        {gpsNote && (
+          <p role="alert" className="mt-2 text-xs text-priority-medium">
+            {gpsNote}
+          </p>
+        )}
 
-        {pinPercent && !pinConfirmed && (
+        {pinCoords && !pinConfirmed && (
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-civic-300 bg-civic-50/60 px-3 py-2.5">
-            <p className="text-xs text-foreground-muted">
-              {pinSource === "gps" && gpsCoords
-                ? `GPS location: ${gpsCoords.lat.toFixed(5)}, ${gpsCoords.lng.toFixed(5)}`
-                : "Drag the pin to fine-tune, then confirm."}
+            <p className="text-xs text-foreground-muted" aria-live="polite">
+              {pinSource === "gps" && gpsCoords ? (
+                <>
+                  GPS location: {gpsCoords.lat.toFixed(5)}, {gpsCoords.lng.toFixed(5)}
+                  {gpsCoords.accuracy != null && (
+                    <> (accuracy: approximately {Math.round(gpsCoords.accuracy)} m)</>
+                  )}
+                  <br />
+                  <span className="text-foreground-muted/80">
+                    {addressLookupPending ? "Looking up address…" : addressNote}
+                  </span>
+                </>
+              ) : pinSource === "search" ? (
+                <>
+                  {addressNote}
+                  <br />
+                  <span className="text-foreground-muted/80">
+                    {pinCoords.lat.toFixed(5)}, {pinCoords.lng.toFixed(5)}
+                  </span>
+                </>
+              ) : (
+                "Drag the pin to fine-tune, then confirm."
+              )}
             </p>
             <div className="flex gap-2">
               <button
@@ -443,14 +474,12 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
           </div>
         )}
 
-        {pinConfirmed && pinPercent && (
+        {pinConfirmed && pinCoords && (
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-civic-50 px-3 py-2.5">
             <p className="flex items-center gap-1.5 text-xs font-medium text-civic-800">
               <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-              Location confirmed
-              {pinSource === "gps" && gpsCoords
-                ? ` — ${gpsCoords.lat.toFixed(5)}, ${gpsCoords.lng.toFixed(5)}`
-                : " — approximate pin"}
+              Location confirmed — {pinCoords.lat.toFixed(5)}, {pinCoords.lng.toFixed(5)}
+              {pinSource === "gps" && gpsCoords?.accuracy != null ? ` (±${Math.round(gpsCoords.accuracy)} m)` : ""}
             </p>
             <button type="button" onClick={resetPin} className="text-xs font-medium text-civic-700 hover:underline">
               Change
@@ -459,8 +488,8 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
         )}
 
         <p className="mt-2 text-[11px] text-foreground-muted">
-          {pinSource === "manual" && pinPercent
-            ? "Illustrative demo map, not to scale — exact coordinates need a connected map provider."
+          {pinSource === "manual"
+            ? "Drag the pin to fine-tune the exact spot, then confirm."
             : "Pinpointing the map is optional, but helps AI route this issue faster."}
         </p>
       </div>

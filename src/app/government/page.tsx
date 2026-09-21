@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { MapPinOff } from "lucide-react";
 import { DepartmentPerformanceCard } from "@/components/cards/DepartmentPerformanceCard";
@@ -8,6 +9,13 @@ import { FollowUpCard } from "@/components/cards/FollowUpCard";
 import { AIInsightCard } from "@/components/cards/AIInsightCard";
 import { DuplicateIssueCard } from "@/components/cards/DuplicateIssueCard";
 import { MapPreview } from "@/components/cards/MapPreview";
+import { AttentionRequiredSection } from "@/components/cards/AttentionRequiredSection";
+import { AgingBucketsChart } from "@/components/cards/AgingBucketsChart";
+import { CategoryTrendsChart } from "@/components/cards/CategoryTrendsChart";
+import { ResolutionQualityCard } from "@/components/cards/ResolutionQualityCard";
+import { WorkloadDistribution } from "@/components/cards/WorkloadDistribution";
+import { DepartmentTrendCard } from "@/components/cards/DepartmentTrendCard";
+import { FollowUpCenter } from "@/components/cards/FollowUpCenter";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { statusLabels } from "@/components/ui/StatusBadge";
 import { categoryLabels } from "@/lib/categories";
@@ -18,10 +26,28 @@ import {
   getDepartmentPerformance,
   getAIInsights,
   getDuplicateGroups,
+  getAgingBuckets,
+  getResolutionQuality,
+  getDepartmentWorkload,
+  getDepartmentTrends,
+  getCategoryTrends,
+  getNeedsAttention,
+  getActionCenterCounts,
 } from "@/lib/data/government";
+import { getFollowUpCenter } from "@/lib/data/reminders";
+import { buildGovernmentMetricsSnapshot, generateGovernmentAIInsights } from "@/lib/government-insights-ai";
+import type { AIInsight } from "@/lib/types";
 
 export const metadata: Metadata = {
   title: "Government Dashboard — CivicFix",
+};
+
+const INSIGHT_TONE: Record<string, AIInsight["tone"]> = {
+  workload: "neutral",
+  risk: "down",
+  trend: "neutral",
+  category: "neutral",
+  geographic: "down",
 };
 
 export default async function GovernmentDashboardPage() {
@@ -52,15 +78,66 @@ export default async function GovernmentDashboardPage() {
     );
   }
 
-  const [issues, areaOverview, departmentPerformance, aiInsights, duplicateGroups] = await Promise.all([
+  const [
+    issues,
+    areaOverview,
+    departmentPerformance,
+    deterministicInsights,
+    duplicateGroups,
+    aging,
+    resolutionQuality,
+    departmentWorkload,
+    departmentTrends,
+    categoryTrends,
+    needsAttention,
+    actionCounts,
+    followUpCenter,
+  ] = await Promise.all([
     getGovernmentIssues(),
     getAreaOverview(),
     getDepartmentPerformance(),
     getAIInsights(),
     getDuplicateGroups(),
+    getAgingBuckets(),
+    getResolutionQuality(),
+    getDepartmentWorkload(),
+    getDepartmentTrends(),
+    getCategoryTrends(30),
+    getNeedsAttention(),
+    getActionCenterCounts(),
+    getFollowUpCenter(),
   ]);
 
   const followUpIssues = issues.filter((i) => i.lastFollowUp);
+
+  // AI-grounded insights receive ONLY the real metrics already computed
+  // above (never raw report content) and are cross-validated against them
+  // (src/lib/government-insights-ai.ts). Any failure — no API key, quota
+  // exhausted, invalid response — falls back to the always-available
+  // deterministic insights; the dashboard's correctness never depends on
+  // AI being reachable (Phase 6E §17).
+  let aiInsights: AIInsight[] = deterministicInsights;
+  try {
+    const metrics = buildGovernmentMetricsSnapshot({
+      overview: areaOverview,
+      aging,
+      quality: resolutionQuality,
+      categories: categoryTrends ?? [],
+      workload: departmentWorkload,
+    });
+    const grounded = await generateGovernmentAIInsights(metrics);
+    if (grounded.length > 0) {
+      aiInsights = grounded.map((g, i) => ({
+        id: `ai-${g.insightType}-${i}`,
+        text: `${g.title} — ${g.summary}`,
+        tone: INSIGHT_TONE[g.insightType] ?? "neutral",
+      }));
+    }
+  } catch {
+    // Expected whenever GEMINI_API_KEY is unset or quota is exhausted —
+    // deterministicInsights (already assigned above) is the honest,
+    // always-real fallback, not a degraded/fake state.
+  }
 
   return (
     <div className="bg-surface-muted">
@@ -76,7 +153,14 @@ export default async function GovernmentDashboardPage() {
           </p>
         </div>
 
-        <div className="mt-8">
+        <div className="mt-4 flex justify-end">
+          <Link href="/government/issues" className="text-xs font-medium text-civic-700 hover:underline">
+            View all issues (paginated) →
+          </Link>
+        </div>
+
+        {/* A. Overview */}
+        <div className="mt-4">
           <JurisdictionExplorer
             issues={issues}
             fallbackOverview={{
@@ -88,8 +172,7 @@ export default async function GovernmentDashboardPage() {
             }}
           />
           <p className="mt-2 text-xs text-foreground-muted">
-            On-time resolution rate: <span className="font-semibold text-foreground">{areaOverview.onTimeResolutionRate}%</span>{" "}
-            of resolved issues within their configured SLA.
+            On-time resolution data unavailable — no configured SLA.
           </p>
         </div>
 
@@ -102,6 +185,33 @@ export default async function GovernmentDashboardPage() {
           </div>
         ) : (
           <>
+            {/* B. Attention Required */}
+            <section className="mt-10">
+              <h2 className="text-lg font-semibold text-foreground">Needs Attention</h2>
+              <p className="mt-1 text-sm text-foreground-muted">Where to focus today — real, linked issues.</p>
+              <div className="mt-4">
+                <AttentionRequiredSection needsAttention={needsAttention} actionCounts={actionCounts} basePath="/government/issues" />
+              </div>
+            </section>
+
+            {/* C. Issue Trends */}
+            <section className="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+              <div className="rounded-2xl border border-border bg-white p-6">
+                <h2 className="text-lg font-semibold text-foreground">Issue Aging</h2>
+                <p className="mt-1 text-xs text-foreground-muted">How long currently-pending issues have been waiting.</p>
+                <div className="mt-4">
+                  <AgingBucketsChart buckets={aging} />
+                </div>
+              </div>
+              <div className="rounded-2xl border border-border bg-white p-6">
+                <h2 className="text-lg font-semibold text-foreground">Category Trends</h2>
+                <div className="mt-4">
+                  <CategoryTrendsChart trends={categoryTrends} days={30} />
+                </div>
+              </div>
+            </section>
+
+            {/* D. Department Performance */}
             <section className="mt-10">
               <h2 className="text-lg font-semibold text-foreground">Department Performance</h2>
               <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-5">
@@ -116,8 +226,25 @@ export default async function GovernmentDashboardPage() {
                   <DepartmentAnalyticsTable departments={departmentPerformance} />
                 </div>
               </div>
+
+              <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+                <div className="rounded-2xl border border-border bg-white p-6">
+                  <h3 className="text-sm font-semibold text-foreground">Workload Distribution</h3>
+                  <p className="mt-1 text-xs text-foreground-muted">Active issues per department — an operational view, not a ranking.</p>
+                  <div className="mt-4">
+                    <WorkloadDistribution workload={departmentWorkload} />
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-border bg-white p-6">
+                  <h3 className="text-sm font-semibold text-foreground">Department Trend</h3>
+                  <div className="mt-4">
+                    <DepartmentTrendCard trends={departmentTrends} />
+                  </div>
+                </div>
+              </div>
             </section>
 
+            {/* E. Geographic Concentration */}
             <section className="mt-10">
               <h2 className="text-lg font-semibold text-foreground">Government Area Map</h2>
               <p className="mt-1 text-sm text-foreground-muted">
@@ -126,16 +253,22 @@ export default async function GovernmentDashboardPage() {
               <div className="mt-4">
                 <MapPreview issues={issues} />
               </div>
-              <p className="mt-3 text-xs text-foreground-muted">
-                Illustrative layout, not a real geographic projection — no map/geocoding provider is
-                configured yet (see the Phase 2 report). Marker positions are not derived from
-                latitude/longitude.
+            </section>
+
+            {/* F. Follow-ups */}
+            <section className="mt-10">
+              <h2 className="text-lg font-semibold text-foreground">Follow-up Center</h2>
+              <p className="mt-1 text-sm text-foreground-muted">
+                Every scheduled reminder you can see, jurisdiction-wide — reuses the existing reminder system.
               </p>
+              <div className="mt-4 rounded-2xl border border-border bg-white p-6">
+                <FollowUpCenter groups={followUpCenter} />
+              </div>
             </section>
 
             {followUpIssues.length > 0 && (
               <section className="mt-10">
-                <h2 className="text-lg font-semibold text-foreground">Follow-up</h2>
+                <h2 className="text-lg font-semibold text-foreground">Follow-up Notes</h2>
                 <p className="mt-1 text-sm text-foreground-muted">
                   Government users monitor and follow up — AI already routed the issue, no manual
                   reassignment needed.
@@ -148,6 +281,18 @@ export default async function GovernmentDashboardPage() {
               </section>
             )}
 
+            {/* G. Resolution Quality */}
+            <section className="mt-10">
+              <h2 className="text-lg font-semibold text-foreground">Resolution Quality</h2>
+              <p className="mt-1 text-sm text-foreground-muted">
+                Factual operational counts — never an interpretation of department performance.
+              </p>
+              <div className="mt-4 rounded-2xl border border-border bg-white p-6">
+                <ResolutionQualityCard quality={resolutionQuality} />
+              </div>
+            </section>
+
+            {/* H. AI Insights */}
             <section className="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
               <div>
                 <h2 className="text-lg font-semibold text-foreground">Insights</h2>

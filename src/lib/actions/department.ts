@@ -5,16 +5,19 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logStatusChange } from "@/lib/actions/status-history";
-import { statusToDb } from "@/lib/db-enums";
-import { validateImageFile } from "@/lib/upload-limits";
+import { notifyStatusChanged } from "@/lib/actions/notifications";
+import { createNotification } from "@/lib/notifications/create";
+import { statusToDb, statusFromDb } from "@/lib/db-enums";
+import { validateImageFile, validateImageBuffer } from "@/lib/upload-limits";
+import { checkRateLimit, retryAfterMessage } from "@/lib/rate-limit";
+import { beginIdempotentAction } from "@/lib/idempotency";
+import { STATUS_ORDER, FORWARD_STATUSES, canSubmitResolution } from "@/lib/status-transitions";
 import type { IssueStatus } from "@/lib/types";
 
 export interface DepartmentActionState {
   error?: string;
   success?: boolean;
 }
-
-const FORWARD_STATUSES: IssueStatus[] = ["ACKNOWLEDGED", "IN_PROGRESS"];
 
 async function assertInchargeOrAdmin(reportId: string) {
   const supabase = await createClient();
@@ -29,7 +32,11 @@ async function assertInchargeOrAdmin(reportId: string) {
   }
 
   const admin = createAdminClient();
-  const { data: report } = await admin.from("reports").select("id, status").eq("id", reportId).maybeSingle();
+  const { data: report } = await admin
+    .from("reports")
+    .select("id, status, reporter_id, title")
+    .eq("id", reportId)
+    .maybeSingle();
   if (!report) return { error: "Report not found." } as const;
 
   if (profile.role !== "admin") {
@@ -57,6 +64,9 @@ export async function updateReportStatus(
   if ("error" in auth) return { error: auth.error };
   const { user, admin, report } = auth;
 
+  const rateLimit = await checkRateLimit(`update_report_status:${user.id}`, 60, 60 * 60);
+  if (!rateLimit.allowed) return { error: retryAfterMessage(rateLimit.retryAfterSeconds) };
+
   const nextStatus = String(formData.get("status") ?? "") as IssueStatus;
   const notes = String(formData.get("notes") ?? "").trim() || null;
 
@@ -64,14 +74,38 @@ export async function updateReportStatus(
     return { error: "Invalid status." };
   }
 
+  const currentStatus = statusFromDb[report.status] ?? "REPORTED";
+  if (STATUS_ORDER[nextStatus] <= STATUS_ORDER[currentStatus]) {
+    return { error: `This report is already at or past "${currentStatus.replace("_", " ").toLowerCase()}".` };
+  }
+
+  const clientKey = String(formData.get("idempotencyKey") ?? "").trim() || null;
+  const idempotency = await beginIdempotentAction<DepartmentActionState>(
+    admin,
+    user.id,
+    "update_report_status",
+    clientKey
+  );
+  if (idempotency.kind === "replay") return idempotency.result;
+  if (idempotency.kind === "in_progress") {
+    return { error: "This update is already being saved. Please wait a moment." };
+  }
+
   const { error } = await admin.from("reports").update({ status: statusToDb[nextStatus] }).eq("id", reportId);
-  if (error) return { error: "Unable to update status. Please try again." };
+  const result: DepartmentActionState = error ? { error: "Unable to update status. Please try again." } : { success: true };
+
+  if (error) {
+    await idempotency.release();
+    return result;
+  }
+  await idempotency.commit(result);
 
   await logStatusChange(admin, reportId, report.status, statusToDb[nextStatus], user.id, notes);
+  await notifyStatusChanged(admin, reportId, report.reporter_id, report.title, statusToDb[nextStatus]);
 
   revalidatePath(`/reports/${reportId}`);
   revalidatePath("/department");
-  return { success: true };
+  return result;
 }
 
 export async function submitResolution(
@@ -82,6 +116,16 @@ export async function submitResolution(
   const auth = await assertInchargeOrAdmin(reportId);
   if ("error" in auth) return { error: auth.error };
   const { user, admin, report } = auth;
+
+  const rateLimit = await checkRateLimit(`file_upload:${user.id}`, 20, 60 * 60);
+  if (!rateLimit.allowed) return { error: retryAfterMessage(rateLimit.retryAfterSeconds) };
+
+  const currentStatus = statusFromDb[report.status] ?? "REPORTED";
+  if (!canSubmitResolution(currentStatus)) {
+    return currentStatus === "RESOLVED"
+      ? { error: "This report has already been resolved." }
+      : { error: "Acknowledge the report and mark it in progress before submitting a resolution." };
+  }
 
   const notes = String(formData.get("notes") ?? "").trim();
   const afterPhoto = formData.get("afterPhoto");
@@ -98,11 +142,45 @@ export async function submitResolution(
   const photoError = validateImageFile(afterPhoto);
   if (photoError) return { error: photoError };
 
+  const clientKey = String(formData.get("idempotencyKey") ?? "").trim() || null;
+  const idempotency = await beginIdempotentAction<DepartmentActionState>(
+    admin,
+    user.id,
+    "submit_resolution",
+    clientKey
+  );
+  if (idempotency.kind === "replay") return idempotency.result;
+  if (idempotency.kind === "in_progress") {
+    return { error: "This resolution is already being saved. Please wait a moment." };
+  }
+
+  const result = await performResolution(reportId, user.id, admin, report, notes, afterPhoto);
+
+  if (result.error) {
+    await idempotency.release();
+    return result;
+  }
+  await idempotency.commit(result);
+
+  revalidatePath(`/reports/${reportId}`);
+  revalidatePath("/department");
+  return result;
+}
+
+async function performResolution(
+  reportId: string,
+  userId: string,
+  admin: ReturnType<typeof createAdminClient>,
+  report: { status: string },
+  notes: string,
+  afterPhoto: File
+): Promise<DepartmentActionState> {
   let afterMediaId: string;
   try {
     const buffer = Buffer.from(await afterPhoto.arrayBuffer());
-    const ext = afterPhoto.name.split(".").pop() || "jpg";
-    const path = `resolution/${reportId}/${randomUUID()}.${ext}`;
+    const { error: bufferError, extension } = validateImageBuffer(buffer);
+    if (bufferError) return { error: bufferError };
+    const path = `resolution/${reportId}/${randomUUID()}.${extension}`;
 
     const { error: uploadError } = await admin.storage
       .from("report-media")
@@ -113,7 +191,7 @@ export async function submitResolution(
       .from("report_media")
       .insert({
         report_id: reportId,
-        uploaded_by: user.id,
+        uploaded_by: userId,
         kind: "after",
         file_path: path,
         file_type: "image",
@@ -141,28 +219,26 @@ export async function submitResolution(
     before_media_id: beforeMedia?.id ?? null,
     after_media_id: afterMediaId,
     resolution_notes: notes,
-    resolved_by: user.id,
+    resolved_by: userId,
   });
   if (resolutionError) return { error: "Unable to save the report. Please try again." };
 
   const { error: statusError } = await admin.from("reports").update({ status: "resolved" }).eq("id", reportId);
   if (statusError) return { error: "Unable to save the report. Please try again." };
 
-  await logStatusChange(admin, reportId, report.status, "resolved", user.id, notes);
+  await logStatusChange(admin, reportId, report.status, "resolved", userId, notes);
 
   // Notify the citizen who reported it.
   const { data: fullReport } = await admin.from("reports").select("reporter_id, title").eq("id", reportId).single();
   if (fullReport) {
-    await admin.from("notifications").insert({
-      recipient_id: fullReport.reporter_id,
+    await createNotification(admin, {
+      recipientId: fullReport.reporter_id,
       type: "report_resolved",
       title: "Your report was resolved",
       body: `"${fullReport.title}" has been marked resolved.`,
-      related_report_id: reportId,
+      relatedReportId: reportId,
     });
   }
 
-  revalidatePath(`/reports/${reportId}`);
-  revalidatePath("/department");
   return { success: true };
 }

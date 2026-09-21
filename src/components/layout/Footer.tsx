@@ -59,7 +59,7 @@ export function Footer() {
         </div>
         <div className="mt-12 flex flex-col-reverse items-center gap-3 border-t border-border pt-6 text-xs text-foreground-muted sm:flex-row sm:justify-between">
           <p>&copy; {new Date().getFullYear()} CivicFix. Built for civic-tech impact.</p>
-          <p>Phase 1 — Foundation &amp; UI/UX</p>
+          <p>AI-powered civic issue reporting &amp; resolution</p>
         </div>
       </div>
     </footer>

@@ -12,11 +12,25 @@ interface Notification {
   body: string | null;
   is_read: boolean;
   related_report_id: string | null;
+  action_url: string | null;
+  priority: "low" | "normal" | "high" | "critical";
   created_at: string;
 }
 
+/** Reuses the exact same priority token colors as PriorityBadge
+ * (src/components/ui/PriorityBadge.tsx) rather than inventing a second
+ * visual language — "normal" (the notification-priority default, distinct
+ * from the report priority scale's "medium") maps to the same amber tone. */
+const PRIORITY_DOT: Record<Notification["priority"], string> = {
+  critical: "bg-priority-critical",
+  high: "bg-priority-high",
+  normal: "bg-priority-medium",
+  low: "bg-priority-low",
+};
+
 export function NotificationRow({ notification }: { notification: Notification }) {
   const [pending, startTransition] = useTransition();
+  const href = notification.action_url ?? (notification.related_report_id ? `/reports/${notification.related_report_id}` : null);
 
   return (
     <li
@@ -39,7 +53,20 @@ export function NotificationRow({ notification }: { notification: Notification }
         )}
       </button>
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold text-foreground">{notification.title}</p>
+        <div className="flex items-center gap-1.5">
+          {(notification.priority === "critical" || notification.priority === "high") && (
+            <span
+              className={cn("h-1.5 w-1.5 shrink-0 rounded-full", PRIORITY_DOT[notification.priority])}
+              aria-hidden="true"
+            />
+          )}
+          <p className="text-sm font-semibold text-foreground">
+            {notification.title}
+            {notification.priority === "critical" && (
+              <span className="ml-1.5 text-xs font-medium text-priority-critical">Critical</span>
+            )}
+          </p>
+        </div>
         {notification.body && <p className="mt-0.5 text-sm text-foreground-muted">{notification.body}</p>}
         <p className="mt-1 text-xs text-foreground-muted">
           {new Date(notification.created_at).toLocaleString("en-US", {
@@ -48,11 +75,8 @@ export function NotificationRow({ notification }: { notification: Notification }
             timeZone: "Asia/Kolkata",
           })}
         </p>
-        {notification.related_report_id && (
-          <Link
-            href={`/reports/${notification.related_report_id}`}
-            className="mt-1 inline-block text-xs font-medium text-civic-700 hover:underline"
-          >
+        {href && (
+          <Link href={href} className="mt-1 inline-block text-xs font-medium text-civic-700 hover:underline">
             View report
           </Link>
         )}

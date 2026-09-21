@@ -33,7 +33,7 @@ export function ProfileForm({ profile }: { profile: Profile }) {
       </label>
 
       {state.error && (
-        <p className="flex items-center gap-1.5 rounded-lg bg-priority-critical-bg px-3 py-2 text-sm text-priority-critical">
+        <p role="alert" className="flex items-center gap-1.5 rounded-lg bg-priority-critical-bg px-3 py-2 text-sm text-priority-critical">
           <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
           {state.error}
         </p>

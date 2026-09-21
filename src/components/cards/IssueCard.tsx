@@ -50,7 +50,7 @@ export function IssueCard({ issue, linkToDetail = true }: { issue: CivicIssue; l
             <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <dt className="sr-only">Location</dt>
             <dd>
-              <p>📍 {issue.location.displayName}</p>
+              <p>{issue.location.displayName}</p>
               <p className="text-foreground-muted/80">{locationCompact(issue.location)}</p>
             </dd>
           </div>

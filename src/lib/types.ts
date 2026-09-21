@@ -6,7 +6,12 @@ export type IssueStatus =
   | "ROUTED"
   | "ACKNOWLEDGED"
   | "IN_PROGRESS"
-  | "RESOLVED";
+  | "RESOLVED"
+  /** Phase 6D — set only via submitResolutionFeedback when the original
+   * reporter says a resolved issue isn't actually fixed. Ranked below
+   * ACKNOWLEDGED/IN_PROGRESS in STATUS_ORDER (status-transitions.ts) so the
+   * department must acknowledge again before resolving again. */
+  | "REOPENED";
 
 export type ProblemCategory =
   | "ROAD"
@@ -53,6 +58,9 @@ export interface CivicLocation {
   address?: string;
   latitude?: number | null;
   longitude?: number | null;
+  /** GPS accuracy radius in meters, when the source actually reported one
+   * (Phase 6B) — never fabricated for a non-GPS source. */
+  accuracy?: number | null;
   source: LocationSource;
 }
 
@@ -83,7 +91,11 @@ export interface DepartmentPerformance {
   totalIssues: number;
   resolvedIssues: number;
   pendingIssues: number;
-  onTimeRate: number;
+  /** Phase 6E — null for real data: no authoritative government-configured
+   * SLA/due date exists anywhere in this product, so "on-time" compliance
+   * is never computed against a real deadline (see src/lib/data/government.ts).
+   * Only ever a real number for clearly-labeled sample/demo data. */
+  onTimeRate: number | null;
   avgResolutionDays: number;
   trend: number;
 }
@@ -112,6 +124,9 @@ export interface Profile {
   gov_constituency: string | null;
   gov_area: string | null;
   department_id: string | null;
+  /** Phase 6C — opt-out map for discretionary notification categories.
+   * Null/absent-key both mean "on"; see src/lib/notifications/preferences.ts. */
+  notification_preferences: Record<string, boolean> | null;
   created_at: string;
   updated_at: string;
 }
@@ -119,4 +134,32 @@ export interface Profile {
 export interface DuplicateGroup {
   primary: Pick<CivicIssue, "id" | "title" | "location" | "category" | "status">;
   similarCount: number;
+  /** Phase 6A — "duplicate" (high-confidence same complaint) vs "related"
+   * (same area/category, lower text overlap). Deterministic, not AI. */
+  relationType?: "duplicate" | "related";
+  reason?: string | null;
+}
+
+/** Phase 4 Step 7 — real server-side pagination for report lists. */
+export interface IssueListFilters {
+  status?: IssueStatus;
+  priority?: Priority;
+  category?: ProblemCategory;
+  /** Matched against title/description (case-insensitive, substring). */
+  search?: string;
+  /** Phase 6E — department id (report_assignments.department_id). Only
+   * meaningful on the government issue explorer, which can see reports
+   * across departments; citizen/department list pages don't need it. */
+  department?: string;
+  /** Phase 6E — inclusive created_at date range, "YYYY-MM-DD". */
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export interface PagedIssues {
+  items: CivicIssue[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  totalPages: number;
 }

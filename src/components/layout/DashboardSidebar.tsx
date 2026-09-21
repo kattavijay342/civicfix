@@ -14,7 +14,7 @@ const items = [
   { label: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 
-export function DashboardSidebar() {
+export function DashboardSidebar({ unreadCount = 0 }: { unreadCount?: number }) {
   const pathname = usePathname();
 
   return (
@@ -24,6 +24,7 @@ export function DashboardSidebar() {
           {items.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href;
+            const badge = item.href === "/notifications" && unreadCount > 0 ? unreadCount : null;
             return (
               <Link
                 key={item.href}
@@ -37,6 +38,11 @@ export function DashboardSidebar() {
               >
                 <Icon className="h-4 w-4" aria-hidden="true" />
                 {item.label}
+                {badge !== null && (
+                  <span className="ml-auto flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
+                    {badge > 9 ? "9+" : badge}
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -48,12 +54,13 @@ export function DashboardSidebar() {
           {items.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href;
+            const badge = item.href === "/notifications" && unreadCount > 0 ? unreadCount : null;
             return (
               <Link
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-2 text-xs font-medium transition",
+                  "flex min-h-10 shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-2.5 text-xs font-medium transition",
                   active
                     ? "border-civic-300 bg-civic-50 text-civic-700"
                     : "border-border bg-white text-foreground-muted",
@@ -61,6 +68,11 @@ export function DashboardSidebar() {
               >
                 <Icon className="h-3.5 w-3.5" aria-hidden="true" />
                 {item.label}
+                {badge !== null && (
+                  <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
+                    {badge > 9 ? "9+" : badge}
+                  </span>
+                )}
               </Link>
             );
           })}

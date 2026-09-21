@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
-import { getSessionProfile } from "@/lib/supabase/server";
+import { getSessionProfile, createClient } from "@/lib/supabase/server";
+import { getUnreadNotificationCount } from "@/lib/data/notifications";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -23,6 +24,9 @@ export const metadata: Metadata = {
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
   const session = await getSessionProfile();
+  const unreadCount = session
+    ? await getUnreadNotificationCount(await createClient(), session.user.id)
+    : 0;
 
   return (
     <html
@@ -36,7 +40,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
         >
           Skip to content
         </a>
-        <Navbar profile={session?.profile ?? null} />
+        <Navbar profile={session?.profile ?? null} unreadCount={unreadCount} />
         <main id="main-content" className="flex-1">
           {children}
         </main>

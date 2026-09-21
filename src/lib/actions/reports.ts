@@ -11,7 +11,12 @@ import { notifyNewAssignment } from "@/lib/actions/notifications";
 import { categoryToDb, categoryFromDb } from "@/lib/db-enums";
 import { categoryLabels } from "@/lib/categories";
 import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
-import { validateImageFile } from "@/lib/upload-limits";
+import { validateImageFile, validateImageBuffer } from "@/lib/upload-limits";
+import { checkRateLimit, retryAfterMessage } from "@/lib/rate-limit";
+import { beginIdempotentAction } from "@/lib/idempotency";
+import { sanitizeCoordinates } from "@/lib/location/validation";
+import { createNotification } from "@/lib/notifications/create";
+import { findGovernmentUsersForJurisdiction } from "@/lib/notifications/targeting";
 import type { CivicLocation, ProblemCategory } from "@/lib/types";
 
 export type CreateReportState =
@@ -45,6 +50,79 @@ async function analyzeWithRetry(input: Parameters<typeof analyzeReport>[0]) {
   throw lastError instanceof Error ? lastError : new AIUnavailableError("AI analysis failed.");
 }
 
+/** Shared shape for the `ai_analyses` insert used by both the initial
+ * submission path and the manual retry path — keeps the flat legacy
+ * columns and the Phase 6A `extended` JSONB blob (subcategory, split
+ * severity/priority reasoning, evidence, action steps, complaint draft) in
+ * exactly one place. */
+function buildAiAnalysesRow(reportId: string, analysis: Awaited<ReturnType<typeof analyzeReport>>) {
+  return {
+    report_id: reportId,
+    problem_summary: analysis.problem_summary,
+    category: analysis.category,
+    severity: analysis.severity,
+    priority: analysis.priority,
+    reasoning: analysis.reasoning,
+    recommended_department: analysis.recommended_department,
+    recommended_action: analysis.recommended_action,
+    confidence: analysis.confidence,
+    model: analysis.model,
+    extended: {
+      subcategory: analysis.subcategory,
+      severity_reasoning: analysis.severity_reasoning,
+      priority_reasoning: analysis.priority_reasoning,
+      action_steps: analysis.action_steps,
+      affected_infrastructure: analysis.affected_infrastructure,
+      urgency_factors: analysis.urgency_factors,
+      safety_risk: analysis.safety_risk,
+      affected_population: analysis.affected_population,
+      time_context: analysis.time_context,
+      location_context: analysis.location_context,
+      evidence: analysis.evidence,
+      complaint_subject: analysis.complaint_subject,
+      complaint_impact: analysis.complaint_impact,
+      complaint_action: analysis.complaint_action,
+    },
+  };
+}
+
+/** Notifies the reporter that AI analysis finished, and — only when the AI
+ * genuinely determined CRITICAL priority — alerts every government user
+ * whose configured jurisdiction covers this report's location. Shared by
+ * both the initial submission path and the manual retry path so the two
+ * can't drift apart. */
+async function notifyAiAnalysisComplete(
+  admin: ReturnType<typeof createAdminClient>,
+  input: {
+    reportId: string;
+    reporterId: string;
+    title: string;
+    analysis: Awaited<ReturnType<typeof analyzeReport>>;
+    location: CivicLocation;
+  }
+) {
+  await createNotification(admin, {
+    recipientId: input.reporterId,
+    type: "ai_analysis_completed",
+    title: "AI analysis complete",
+    body: `"${input.title}" has been analyzed and classified as ${input.analysis.priority} priority.`,
+    relatedReportId: input.reportId,
+  });
+
+  if (input.analysis.priority === "critical") {
+    const govUserIds = await findGovernmentUsersForJurisdiction(admin, input.location);
+    for (const recipientId of govUserIds) {
+      await createNotification(admin, {
+        recipientId,
+        type: "critical_issue",
+        title: "Critical issue reported in your jurisdiction",
+        body: `"${input.title}" — ${input.analysis.problem_summary}`,
+        relatedReportId: input.reportId,
+      });
+    }
+  }
+}
+
 function deriveTitle(description: string, category: ProblemCategory): string {
   const firstSentence = description.split(/[.!?\n]/)[0]?.trim();
   if (firstSentence && firstSentence.length >= 8) {
@@ -66,6 +144,35 @@ export async function createReport(
     return { status: "error", error: "You must be signed in to submit a report." };
   }
 
+  const rateLimit = await checkRateLimit(`create_report:${user.id}`, 10, 60 * 60);
+  if (!rateLimit.allowed) {
+    return { status: "error", error: retryAfterMessage(rateLimit.retryAfterSeconds) };
+  }
+
+  const admin = createAdminClient();
+  const clientKey = String(formData.get("idempotencyKey") ?? "").trim() || null;
+  const idempotency = await beginIdempotentAction<CreateReportState>(admin, user.id, "create_report", clientKey);
+  if (idempotency.kind === "replay") return idempotency.result;
+  if (idempotency.kind === "in_progress") {
+    return { status: "error", error: "This report is already being submitted. Please wait a moment." };
+  }
+
+  const result = await performCreateReport(user.id, supabase, admin, formData);
+  // "duplicate" is a harmless read-only outcome (safe to replay); "error"
+  // means nothing durable should be attributed to this key, so it's
+  // released for a real retry instead of replaying a stale failure.
+  if (result.status === "error") await idempotency.release();
+  else await idempotency.commit(result);
+  return result;
+}
+
+async function performCreateReport(
+  userId: string,
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  admin: ReturnType<typeof createAdminClient>,
+  formData: FormData
+): Promise<CreateReportState> {
+  const user = { id: userId };
   const description = String(formData.get("description") ?? "").trim();
   const category = String(formData.get("category") ?? "") as ProblemCategory;
   const locationRaw = String(formData.get("location") ?? "");
@@ -100,8 +207,6 @@ export async function createReport(
     return { status: "error", error: "Please select a location on the map." };
   }
 
-  const admin = createAdminClient();
-
   // Keep the profile's own name/mobile in sync instead of duplicating it
   // per-report (Step "Reporter details").
   const { data: profile } = await supabase
@@ -119,24 +224,30 @@ export async function createReport(
       .eq("id", user.id);
   }
 
-  if (!confirmDuplicate) {
-    try {
-      const duplicate = await findPossibleDuplicate(admin, {
-        category: categoryToDb[category],
-        location,
-        description,
-      });
-      if (duplicate && duplicate.score >= 0.55) {
-        return {
-          status: "duplicate",
-          duplicateReportId: duplicate.reportId,
-          duplicateTitle: duplicate.title,
-        };
-      }
-    } catch {
-      // Duplicate detection is a best-effort convenience — never block
-      // submission if it fails.
-    }
+  // Always computed (even when confirmDuplicate=true) so the "submit
+  // anyway" path can still record accurate relation_type/reason metadata
+  // below instead of a guessed default — this is a cheap deterministic DB
+  // query, not an AI call, so it doesn't conflict with the cost-control
+  // rule around unnecessary AI usage.
+  let duplicateCandidate: Awaited<ReturnType<typeof findPossibleDuplicate>> = null;
+  try {
+    duplicateCandidate = await findPossibleDuplicate(admin, {
+      category: categoryToDb[category],
+      location,
+      description,
+    });
+  } catch (err) {
+    // Duplicate detection is a best-effort convenience — never block
+    // submission if it fails, but still log so silent failures are visible.
+    console.error("Duplicate detection failed", err);
+  }
+
+  if (!confirmDuplicate && duplicateCandidate && duplicateCandidate.score >= 0.55) {
+    return {
+      status: "duplicate",
+      duplicateReportId: duplicateCandidate.reportId,
+      duplicateTitle: duplicateCandidate.title,
+    };
   }
 
   const title = deriveTitle(description, category);
@@ -159,6 +270,20 @@ export async function createReport(
 
   const reportId: string = report.id;
 
+  await createNotification(admin, {
+    recipientId: user.id,
+    type: "report_created",
+    title: "Report submitted",
+    body: `"${title}" has been received and is being analyzed.`,
+    relatedReportId: reportId,
+  });
+
+  // Phase 6B: never trust client-supplied coordinates as-is — the client
+  // already validates (SmartLocationField), but this is the actual security
+  // boundary. An invalid/out-of-range pair becomes null (never a fake
+  // default like 0,0), and a claimed "gps" source without a valid pair is
+  // downgraded to "manual" rather than asserting a GPS fix that isn't real.
+  const sanitizedCoords = sanitizeCoordinates(location.latitude, location.longitude, location.accuracy);
   const { error: locationError } = await admin.from("report_locations").insert({
     report_id: reportId,
     display_name: location.displayName,
@@ -171,22 +296,38 @@ export async function createReport(
     municipality: location.municipality ?? null,
     landmark: location.landmark ?? null,
     address: location.address ?? null,
-    latitude: location.latitude ?? null,
-    longitude: location.longitude ?? null,
-    location_source: location.source ?? "manual",
+    latitude: sanitizedCoords?.latitude ?? null,
+    longitude: sanitizedCoords?.longitude ?? null,
+    location_source: sanitizedCoords ? (location.source ?? "manual") : "manual",
   });
 
   if (locationError) {
     return { status: "error", error: DB_FAILURE_MESSAGE };
   }
 
+  // Best-effort only, deliberately a separate statement from the insert
+  // above: accuracy_meters (migration 0010) is a real enhancement, not a
+  // core field, so its write must never be able to block report creation —
+  // including in the window before that migration has been applied to a
+  // given environment, where this column doesn't exist yet.
+  if (sanitizedCoords?.accuracy != null) {
+    const { error: accuracyError } = await admin
+      .from("report_locations")
+      .update({ accuracy_meters: sanitizedCoords.accuracy })
+      .eq("report_id", reportId);
+    if (accuracyError) console.error("Failed to store GPS accuracy (non-fatal)", accuracyError);
+  }
+
   if (confirmDuplicate) {
     const duplicateOf = String(formData.get("duplicateOf") ?? "");
     if (duplicateOf) {
+      const matchesCandidate = duplicateCandidate?.reportId === duplicateOf;
       await admin.from("report_duplicate_flags").insert({
         report_id: reportId,
         possible_duplicate_of: duplicateOf,
-        similarity_score: 0.55,
+        similarity_score: matchesCandidate ? duplicateCandidate!.score : 0.55,
+        relation_type: matchesCandidate ? duplicateCandidate!.relationType : "related",
+        reason: matchesCandidate ? duplicateCandidate!.reason : null,
       });
     }
   }
@@ -201,8 +342,11 @@ export async function createReport(
     }
     try {
       const buffer = Buffer.from(await photo.arrayBuffer());
-      const ext = photo.name.split(".").pop() || "jpg";
-      const path = `${user.id}/${reportId}/${randomUUID()}.${ext}`;
+      const { error: bufferError, extension } = validateImageBuffer(buffer);
+      if (bufferError) {
+        return { status: "error", error: bufferError };
+      }
+      const path = `${user.id}/${reportId}/${randomUUID()}.${extension}`;
 
       const { error: uploadError } = await admin.storage
         .from("report-media")
@@ -238,18 +382,7 @@ export async function createReport(
       imageMimeType,
     });
 
-    await admin.from("ai_analyses").insert({
-      report_id: reportId,
-      problem_summary: analysis.problem_summary,
-      category: analysis.category,
-      severity: analysis.severity,
-      priority: analysis.priority,
-      reasoning: analysis.reasoning,
-      recommended_department: analysis.recommended_department,
-      recommended_action: analysis.recommended_action,
-      confidence: analysis.confidence,
-      model: analysis.model,
-    });
+    await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
 
     await admin
       .from("reports")
@@ -260,6 +393,7 @@ export async function createReport(
       })
       .eq("id", reportId);
     await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete");
+    await notifyAiAnalysisComplete(admin, { reportId, reporterId: user.id, title, analysis, location });
 
     const assignment = await resolveAssignment(admin, category, location);
     if (assignment) {
@@ -290,6 +424,9 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
   } = await supabase.auth.getUser();
   if (!user) return { error: "You must be signed in." };
 
+  const rateLimit = await checkRateLimit(`retry_ai_analysis:${user.id}`, 5, 60 * 60);
+  if (!rateLimit.allowed) return { error: retryAfterMessage(rateLimit.retryAfterSeconds) };
+
   const admin = createAdminClient();
 
   const { data: report } = await admin
@@ -315,41 +452,39 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
 
   const category = categoryFromDb[report.category];
 
+  const retryLocation: CivicLocation = {
+    displayName: location.display_name,
+    state: location.state,
+    district: location.district,
+    constituency: location.constituency,
+    area: location.area,
+    landmark: location.landmark,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    source: location.location_source,
+  };
+
   try {
     const analysis = await analyzeWithRetry({
       description: report.description,
       category,
-      location: {
-        displayName: location.display_name,
-        state: location.state,
-        district: location.district,
-        constituency: location.constituency,
-        area: location.area,
-        landmark: location.landmark,
-        latitude: location.latitude,
-        longitude: location.longitude,
-        source: location.location_source,
-      },
+      location: retryLocation,
     });
 
-    await admin.from("ai_analyses").insert({
-      report_id: reportId,
-      problem_summary: analysis.problem_summary,
-      category: analysis.category,
-      severity: analysis.severity,
-      priority: analysis.priority,
-      reasoning: analysis.reasoning,
-      recommended_department: analysis.recommended_department,
-      recommended_action: analysis.recommended_action,
-      confidence: analysis.confidence,
-      model: analysis.model,
-    });
+    await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
 
     await admin
       .from("reports")
       .update({ severity: analysis.severity, priority: analysis.priority, status: "ai_analyzed" })
       .eq("id", reportId);
     await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete (retry)");
+    await notifyAiAnalysisComplete(admin, {
+      reportId,
+      reporterId: report.reporter_id,
+      title: report.title,
+      analysis,
+      location: retryLocation,
+    });
 
     const assignment = await resolveAssignment(admin, category, location);
     if (assignment) {

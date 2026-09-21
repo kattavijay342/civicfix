@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
 import { roleHomePath } from "@/lib/role-routes";
+import { checkRateLimit, getClientIp, retryAfterMessage } from "@/lib/rate-limit";
 
 export interface AuthFormState {
   error?: string;
@@ -37,6 +38,12 @@ export async function signUp(
     return { error: "Enter a valid 10-digit Indian mobile number." };
   }
 
+  const ip = await getClientIp();
+  const ipLimit = await checkRateLimit(`auth_signup:ip:${ip}`, 8, 60 * 60);
+  if (!ipLimit.allowed) return { error: retryAfterMessage(ipLimit.retryAfterSeconds) };
+  const emailLimit = await checkRateLimit(`auth_signup:email:${email.toLowerCase()}`, 4, 60 * 60);
+  if (!emailLimit.allowed) return { error: retryAfterMessage(emailLimit.retryAfterSeconds) };
+
   const supabase = await createClient();
   const { error } = await supabase.auth.signUp({
     email,
@@ -51,7 +58,10 @@ export async function signUp(
   });
 
   if (error) {
-    return { error: error.message };
+    if (error.message.toLowerCase().includes("already registered")) {
+      return { error: "An account with this email already exists. Try signing in instead." };
+    }
+    return { error: "Unable to create your account. Please try again." };
   }
 
   redirect(roleHomePath("citizen"));
@@ -67,6 +77,12 @@ export async function signIn(
   if (!email || !password) {
     return { error: "Email and password are required." };
   }
+
+  const ip = await getClientIp();
+  const ipLimit = await checkRateLimit(`auth_signin:ip:${ip}`, 20, 10 * 60);
+  if (!ipLimit.allowed) return { error: retryAfterMessage(ipLimit.retryAfterSeconds) };
+  const emailLimit = await checkRateLimit(`auth_signin:email:${email.toLowerCase()}`, 8, 10 * 60);
+  if (!emailLimit.allowed) return { error: retryAfterMessage(emailLimit.retryAfterSeconds) };
 
   const supabase = await createClient();
   const { error } = await supabase.auth.signInWithPassword({ email, password });

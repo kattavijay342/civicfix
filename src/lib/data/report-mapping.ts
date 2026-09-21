@@ -1,7 +1,86 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { categoryFromDb, priorityFromDb, statusFromDb } from "@/lib/db-enums";
-import type { CivicIssue } from "@/lib/types";
+import { categoryFromDb, priorityFromDb, statusFromDb, categoryToDb, priorityToDb, statusToDb } from "@/lib/db-enums";
+import type { CivicIssue, IssueListFilters, PagedIssues } from "@/lib/types";
+
+export const ISSUE_LIST_SELECT = "id, title, category, status, priority, created_at, description";
+
+/** Strips characters meaningful to PostgREST's `.or()` filter grammar
+ * (`,()%*`) out of free-text search input before it's interpolated into a
+ * filter string — not a SQL injection risk (PostgREST parses this against
+ * known columns/operators, never as raw SQL), but an unescaped comma or
+ * paren would break the filter's own syntax and 400 the request. */
+function sanitizeSearchTerm(term: string): string {
+  return term.replace(/[,()%*]/g, "").trim();
+}
+
+/**
+ * Applies the shared status/priority/category/search filters (Phase 4 Step
+ * 7) to a reports query. Kept generic over the builder type so it works
+ * whether or not `.select(..., { count: "exact" })` was already chained.
+ */
+interface FilterableQuery<Q> {
+  eq(column: string, value: unknown): Q;
+  or(filters: string): Q;
+  gte(column: string, value: unknown): Q;
+  lt(column: string, value: unknown): Q;
+}
+
+/** "YYYY-MM-DD" only — anything else is silently ignored rather than
+ * passed through to `.gte()`/`.lt()` as an invalid Postgres date literal. */
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function applyIssueFilters<Q extends FilterableQuery<Q>>(query: Q, filters?: IssueListFilters): Q {
+  let q = query;
+  if (filters?.status) q = q.eq("status", statusToDb[filters.status]);
+  if (filters?.priority) q = q.eq("priority", priorityToDb[filters.priority]);
+  if (filters?.category) q = q.eq("category", categoryToDb[filters.category]);
+  if (filters?.search) {
+    const term = sanitizeSearchTerm(filters.search);
+    if (term) q = q.or(`title.ilike.%${term}%,description.ilike.%${term}%`);
+  }
+  if (filters?.dateFrom && DATE_ONLY_RE.test(filters.dateFrom)) {
+    q = q.gte("created_at", `${filters.dateFrom}T00:00:00.000Z`);
+  }
+  if (filters?.dateTo && DATE_ONLY_RE.test(filters.dateTo)) {
+    // Inclusive of the whole end day: strictly-less-than the day AFTER dateTo.
+    const nextDay = new Date(`${filters.dateTo}T00:00:00.000Z`);
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+    q = q.lt("created_at", nextDay.toISOString());
+  }
+  return q;
+}
+
+export function clampPage(page: number | undefined): number {
+  return Number.isFinite(page) && (page as number) >= 1 ? Math.floor(page as number) : 1;
+}
+
+export const ISSUE_LIST_PAGE_SIZE = 20;
+
+export async function toPagedIssues(
+  readClient: SupabaseClient,
+  admin: SupabaseClient,
+  rows: Array<{
+    id: string;
+    title: string;
+    category: string;
+    status: string;
+    priority: string | null;
+    created_at: string;
+    description: string;
+  }>,
+  totalCount: number,
+  page: number,
+  pageSize: number
+): Promise<PagedIssues> {
+  return {
+    items: await mapReportsToIssues(readClient, admin, rows),
+    page,
+    pageSize,
+    totalCount,
+    totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+  };
+}
 
 function daysBetween(iso: string) {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24)));
@@ -73,7 +152,7 @@ export async function mapReportsToIssues(
   const imageUrlByReport = new Map<string, string>();
   await Promise.all(
     [...firstMediaByReport.entries()].map(async ([reportId, path]) => {
-      const { data } = await admin.storage.from("report-media").createSignedUrl(path, 3600);
+      const { data } = await admin.storage.from("report-media").createSignedUrl(path, 900);
       if (data?.signedUrl) imageUrlByReport.set(reportId, data.signedUrl);
     })
   );
@@ -94,6 +173,7 @@ export async function mapReportsToIssues(
             landmark: loc.landmark ?? undefined,
             latitude: loc.latitude,
             longitude: loc.longitude,
+            accuracy: loc.accuracy_meters ?? null,
             source: loc.location_source,
           }
         : { displayName: "Location not recorded", source: "manual" },

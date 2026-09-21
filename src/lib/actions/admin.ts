@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { checkRateLimit, retryAfterMessage } from "@/lib/rate-limit";
 import type { UserRole } from "@/lib/types";
 
 export interface AdminActionState {
@@ -31,6 +32,9 @@ export async function createDepartment(
   const auth = await requireAdmin();
   if ("error" in auth) return { error: auth.error };
 
+  const rateLimit = await checkRateLimit(`admin_action:${auth.user.id}`, 40, 60 * 60);
+  if (!rateLimit.allowed) return { error: retryAfterMessage(rateLimit.retryAfterSeconds) };
+
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim() || null;
   if (!name) return { error: "Department name is required." };
@@ -57,6 +61,9 @@ export async function updateUserRole(
 ): Promise<AdminActionState> {
   const auth = await requireAdmin();
   if ("error" in auth) return { error: auth.error };
+
+  const rateLimit = await checkRateLimit(`admin_action:${auth.user.id}`, 40, 60 * 60);
+  if (!rateLimit.allowed) return { error: retryAfterMessage(rateLimit.retryAfterSeconds) };
 
   const role = String(formData.get("role") ?? "") as UserRole;
   const departmentId = String(formData.get("departmentId") ?? "") || null;

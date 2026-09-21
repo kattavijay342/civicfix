@@ -1,6 +1,7 @@
 import { MapPin, Landmark, Building2, Flag } from "lucide-react";
 import type { CivicLocation } from "@/lib/types";
 import { locationJurisdictionChain } from "@/lib/location-format";
+import { cn } from "@/lib/utils";
 
 const icons = [MapPin, Landmark, Building2, Flag];
 
@@ -21,9 +22,10 @@ export function JurisdictionChain({ location }: { location: CivicLocation }) {
             <li key={step}>
               <div className="flex items-center gap-3 text-sm">
                 <span
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                    i === 0 ? "bg-civic-600 text-white" : "bg-civic-50 text-civic-700"
-                  }`}
+                  className={cn(
+                    "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+                    i === 0 ? "bg-civic-600 text-white" : "bg-civic-50 text-civic-700",
+                  )}
                 >
                   <Icon className="h-4 w-4" aria-hidden="true" />
                 </span>

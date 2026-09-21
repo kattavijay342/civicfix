@@ -1,165 +1,208 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { MapPin, X } from "lucide-react";
-import { PriorityBadge } from "@/components/ui/PriorityBadge";
-import type { CivicIssue } from "@/lib/types";
-import { locationHeadline } from "@/lib/location-format";
+import { useRouter } from "next/navigation";
+import { MapPinOff, ShieldAlert } from "lucide-react";
+import { statusLabels } from "@/components/ui/StatusBadge";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { categoryLabels } from "@/lib/categories";
+import { isValidLatitude, isValidLongitude } from "@/lib/location/validation";
+import { CivicMap } from "@/components/map/CivicMap";
+import type { CivicMapIssueMarker } from "@/components/map/mapTypes";
+import type { CivicIssue, IssueStatus, Priority, ProblemCategory } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-interface MapMarker extends Pick<CivicIssue, "id" | "title" | "location" | "priority" | "department"> {
-  x: number;
-  y: number;
-}
+const selectClass =
+  "min-h-9 rounded-lg border border-border bg-white px-2.5 py-1.5 text-xs font-medium text-foreground focus-visible:border-civic-400";
 
-/** Deterministic pseudo-position from an id string — spreads markers across
- * the illustrative surface without claiming any real geographic projection.
- * No map/geocoding provider is configured (see Phase 2 report), so this is
- * intentionally NOT derived from latitude/longitude. */
-function hashPosition(id: string): { x: number; y: number } {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  const x = 15 + (h % 7000) / 100; // 15 - 85
-  const y = 15 + ((h >>> 8) % 7000) / 100;
-  return { x, y };
-}
-
-const markerColor: Record<MapMarker["priority"], string> = {
-  CRITICAL: "bg-priority-critical",
-  HIGH: "bg-priority-high",
-  MEDIUM: "bg-priority-medium",
-  LOW: "bg-priority-low",
-};
-
-const heatZones = [
-  { x: 32, y: 42, size: 90, opacity: 0.16 },
-  { x: 60, y: 30, size: 70, opacity: 0.12 },
-  { x: 40, y: 66, size: 75, opacity: 0.13 },
-];
+/** Below this many plotted issues, a heatmap/density layer wouldn't show
+ * anything meaningful — a real message instead of a decorative fake one. */
+const MIN_ISSUES_FOR_DENSITY = 5;
 
 /**
- * Stylized, provider-agnostic map surface. No real geocoding/tiles are wired
- * up yet — this establishes the marker/heatmap layout so a real map SDK
- * (Google Maps, Mapbox, Leaflet, etc.) can be dropped in behind these
- * coordinates in a later phase without reworking the UI.
+ * Phase 6B, now on a real Mapbox map. Every marker position is genuinely
+ * derived from that report's own stored latitude/longitude — never a hash
+ * of the report id, and never a fabricated "zone." Reports without valid
+ * coordinates (most manually-entered ones) simply aren't plotted, and
+ * that's shown honestly rather than guessed at.
  */
 export function MapPreview({ issues }: { issues: CivicIssue[] }) {
-  const markers: MapMarker[] = useMemo(
-    () =>
-      issues.map((issue) => ({
-        id: issue.id,
-        title: issue.title,
-        location: issue.location,
-        priority: issue.priority,
-        department: issue.department,
-        ...hashPosition(issue.id),
-      })),
+  const router = useRouter();
+  const [priorityFilter, setPriorityFilter] = useState<Priority | "ALL">("ALL");
+  const [statusFilter, setStatusFilter] = useState<IssueStatus | "ALL">("ALL");
+  const [categoryFilter, setCategoryFilter] = useState<ProblemCategory | "ALL">("ALL");
+  const [departmentFilter, setDepartmentFilter] = useState<string>("ALL");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const departmentOptions = useMemo(
+    () => Array.from(new Set(issues.map((i) => i.department))).sort((a, b) => a.localeCompare(b)),
     [issues]
   );
-  const [active, setActive] = useState<MapMarker | null>(markers[0] ?? null);
+
+  const fromTime = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : null;
+  const toTime = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : null;
+
+  const filteredIssues = useMemo(
+    () =>
+      issues.filter((i) => {
+        if (priorityFilter !== "ALL" && i.priority !== priorityFilter) return false;
+        if (statusFilter !== "ALL" && i.status !== statusFilter) return false;
+        if (categoryFilter !== "ALL" && i.category !== categoryFilter) return false;
+        if (departmentFilter !== "ALL" && i.department !== departmentFilter) return false;
+        const reportedTime = new Date(i.reportedDate).getTime();
+        if (fromTime != null && reportedTime < fromTime) return false;
+        if (toTime != null && reportedTime > toTime) return false;
+        return true;
+      }),
+    [issues, priorityFilter, statusFilter, categoryFilter, departmentFilter, fromTime, toTime]
+  );
+
+  const plottableIssues = useMemo(
+    () => filteredIssues.filter((i) => isValidLatitude(i.location.latitude) && isValidLongitude(i.location.longitude)),
+    [filteredIssues]
+  );
+
+  const markers: CivicMapIssueMarker[] = useMemo(
+    () =>
+      plottableIssues.map((issue) => ({
+        id: issue.id,
+        latitude: issue.location.latitude as number,
+        longitude: issue.location.longitude as number,
+        priority: issue.priority,
+        title: issue.title,
+        statusLabel: statusLabels[issue.status],
+        department: issue.department,
+        reportedDateLabel: new Date(issue.reportedDate).toLocaleDateString(),
+      })),
+    [plottableIssues]
+  );
+
+  const showDensity = markers.length >= MIN_ISSUES_FOR_DENSITY;
 
   return (
-    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-border bg-[#eef3ee] sm:aspect-[16/9]">
-      <svg className="absolute inset-0 h-full w-full opacity-60" aria-hidden="true">
-        <defs>
-          <pattern id="map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
-            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#d5ded5" strokeWidth="1" />
-          </pattern>
-        </defs>
-        <rect width="100%" height="100%" fill="url(#map-grid)" />
-      </svg>
-
-      <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
-        <path
-          d="M0,120 C150,80 250,160 400,110 C500,80 600,140 800,100"
-          fill="none"
-          stroke="#c9d4c9"
-          strokeWidth="10"
-        />
-        <path
-          d="M100,0 C140,120 90,240 160,340"
-          fill="none"
-          stroke="#c9d4c9"
-          strokeWidth="8"
-        />
-        <path
-          d="M0,260 C120,240 260,300 420,260 C560,230 640,280 800,250"
-          fill="none"
-          stroke="#c9d4c9"
-          strokeWidth="7"
-        />
-        <path
-          d="M320,0 C300,140 360,220 340,340"
-          fill="none"
-          stroke="#c9d4c9"
-          strokeWidth="6"
-        />
-      </svg>
-
-      <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
-        {heatZones.map((zone, i) => (
-          <circle
-            key={i}
-            cx={`${zone.x}%`}
-            cy={`${zone.y}%`}
-            r={zone.size}
-            fill="var(--color-priority-critical)"
-            opacity={zone.opacity}
-          />
-        ))}
-      </svg>
-
-      <div
-        className="absolute left-[8%] top-[15%] h-[32%] w-[38%] rounded-3xl border border-dashed border-civic-300"
-        aria-hidden="true"
-      />
-      <span className="absolute left-[9%] top-[12%] text-[10px] font-semibold uppercase tracking-wide text-civic-700">
-        Zone 2
-      </span>
-
-      {markers.map((marker) => (
+    <div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <button
-          key={marker.id}
           type="button"
-          onClick={() => setActive(marker)}
+          onClick={() => setPriorityFilter((p) => (p === "CRITICAL" ? "ALL" : "CRITICAL"))}
+          aria-pressed={priorityFilter === "CRITICAL"}
           className={cn(
-            "absolute flex h-6 w-6 -translate-x-1/2 -translate-y-full items-center justify-center rounded-full border-2 border-white shadow-md transition-transform hover:scale-110",
-            markerColor[marker.priority],
-            active?.id === marker.id && "ring-2 ring-offset-2 ring-civic-500",
+            "inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition",
+            priorityFilter === "CRITICAL"
+              ? "border-priority-critical bg-priority-critical-bg text-priority-critical"
+              : "border-border bg-white text-foreground-muted hover:border-priority-critical/40"
           )}
-          style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
-          aria-label={`${marker.title} — ${marker.priority.toLowerCase()} priority`}
-          aria-pressed={active?.id === marker.id}
         >
-          <MapPin className="h-3.5 w-3.5 text-white" aria-hidden="true" />
+          <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+          Critical Issues
         </button>
-      ))}
-
-      {active && (
-        <div className="absolute bottom-3 left-3 right-3 flex items-start justify-between gap-3 rounded-xl border border-border bg-white/95 p-4 shadow-lg backdrop-blur sm:left-4 sm:right-auto sm:w-72">
-          <div>
-            <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-foreground-muted">
-              <MapPin className="h-3 w-3" aria-hidden="true" />
-              Issue marker
-            </span>
-            <p className="mt-1.5 text-sm font-semibold leading-snug text-foreground">
-              {active.title}
-            </p>
-            <div className="mt-1.5">
-              <PriorityBadge priority={active.priority} />
-            </div>
-            <p className="mt-1.5 text-xs text-foreground-muted">{locationHeadline(active.location)}</p>
-            <p className="mt-0.5 text-xs font-medium text-civic-700">{active.department}</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setActive(null)}
-            className="rounded-full p-1 text-foreground-muted hover:bg-surface-muted hover:text-foreground"
-            aria-label="Close issue preview"
+        <select
+          value={priorityFilter}
+          onChange={(e) => setPriorityFilter(e.target.value as Priority | "ALL")}
+          className={selectClass}
+          aria-label="Filter map by priority"
+        >
+          <option value="ALL">All Priorities</option>
+          <option value="CRITICAL">Critical</option>
+          <option value="HIGH">High</option>
+          <option value="MEDIUM">Medium</option>
+          <option value="LOW">Low</option>
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as IssueStatus | "ALL")}
+          className={selectClass}
+          aria-label="Filter map by status"
+        >
+          <option value="ALL">All Statuses</option>
+          {Object.entries(statusLabels).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value as ProblemCategory | "ALL")}
+          className={selectClass}
+          aria-label="Filter map by category"
+        >
+          <option value="ALL">All Categories</option>
+          {Object.entries(categoryLabels).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        {departmentOptions.length > 0 && (
+          <select
+            value={departmentFilter}
+            onChange={(e) => setDepartmentFilter(e.target.value)}
+            className={selectClass}
+            aria-label="Filter map by department"
           >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
+            <option value="ALL">All Departments</option>
+            {departmentOptions.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        )}
+        <label className="flex items-center gap-1.5 text-xs font-medium text-foreground-muted">
+          From
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            aria-label="Filter map from date"
+            className={selectClass}
+          />
+        </label>
+        <label className="flex items-center gap-1.5 text-xs font-medium text-foreground-muted">
+          To
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            aria-label="Filter map to date"
+            className={selectClass}
+          />
+        </label>
+      </div>
+
+      {plottableIssues.length === 0 ? (
+        <EmptyState
+          icon={<MapPinOff className="h-5 w-5" aria-hidden="true" />}
+          title="Not enough location data to generate this view"
+          description={
+            filteredIssues.length === 0
+              ? "No issues match the selected filters."
+              : `${filteredIssues.length} issue${filteredIssues.length === 1 ? "" : "s"} match the selected filters, but none have GPS coordinates recorded yet — most locations today are entered manually without a map pin.`
+          }
+        />
+      ) : (
+        <>
+          <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-border sm:aspect-[16/9]">
+            <CivicMap
+              mode="multi"
+              issues={markers}
+              onViewIssue={(id) => router.push(`/reports/${id}`)}
+              showDensity={showDensity}
+              fitToIssues
+            />
+          </div>
+
+          <p className="mt-2 text-[11px] text-foreground-muted">
+            {markers.length} of {filteredIssues.length} matching issue{filteredIssues.length === 1 ? "" : "s"} have
+            recorded GPS coordinates and appear above, clustered by proximity. Marker color and letter both show
+            priority.
+            {!showDensity &&
+              markers.length > 0 &&
+              " Not enough mapped issues to show a meaningful density view."}
+          </p>
+        </>
       )}
     </div>
   );

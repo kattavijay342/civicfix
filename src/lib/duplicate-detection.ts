@@ -27,17 +27,51 @@ function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number)
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+export type DuplicateRelationType = "duplicate" | "related";
+
 export interface DuplicateCandidate {
   reportId: string;
   title: string;
   score: number;
+  /** Phase 6A — "duplicate" (high-confidence same complaint) vs "related"
+   * (same area/category but lower text overlap). Deterministic, not
+   * AI-generated — see the module doc comment below for why. */
+  relationType: DuplicateRelationType;
+  /** Deterministic, human-readable explanation of which signals matched. */
+  reason: string;
+}
+
+/** Score at/above this is treated as the same complaint being re-reported;
+ * below it (but still >= the submit-time gate in src/lib/actions/reports.ts)
+ * it's a genuinely different report that's merely related. */
+const DUPLICATE_RELATION_THRESHOLD = 0.8;
+
+function buildReason(input: {
+  sameArea: boolean;
+  near: boolean;
+  similarity: number;
+  daysAgo: number;
+}): string {
+  const signals: string[] = [];
+  if (input.sameArea) signals.push("same category and area");
+  else if (input.near) signals.push("same category and within ~300m");
+  if (input.similarity >= 0.35) signals.push("similar wording");
+  const recency =
+    input.daysAgo <= 1 ? "reported today" : `reported ${input.daysAgo} day${input.daysAgo === 1 ? "" : "s"} ago`;
+  signals.push(recency);
+  return signals.length > 0 ? signals.join(", ") : "Matched on category and location only.";
 }
 
 /**
- * Heuristic-only duplicate detection (Step 17): same category, same
- * area/jurisdiction or within ~300m, reported in the last 14 days, still
- * unresolved. Never auto-merges — the caller surfaces this as a
- * "possible duplicate" for a human to review.
+ * Heuristic-only duplicate/related detection (Step 17, extended in Phase
+ * 6A): same category, same area/jurisdiction or within ~300m, reported in
+ * the last 14 days, still unresolved. Deliberately deterministic rather
+ * than an extra AI semantic-comparison call per report — the existing
+ * geo+category+text-overlap signal already reliably separates "clearly the
+ * same complaint" from "loosely related," and computing it this way costs
+ * one query, zero AI calls, and is fully unit-testable. Never auto-merges —
+ * the caller surfaces this as a "possible duplicate"/"related issue" for a
+ * human to review.
  */
 export async function findPossibleDuplicate(
   admin: SupabaseClient,
@@ -90,7 +124,14 @@ export async function findPossibleDuplicate(
     const score = 0.5 + Math.min(similarity, 0.5);
 
     if (!best || score > best.score) {
-      best = { reportId: candidate.id, title: candidate.title, score };
+      const daysAgo = Math.floor((Date.now() - new Date(candidate.created_at).getTime()) / (24 * 60 * 60 * 1000));
+      best = {
+        reportId: candidate.id,
+        title: candidate.title,
+        score,
+        relationType: score >= DUPLICATE_RELATION_THRESHOLD ? "duplicate" : "related",
+        reason: buildReason({ sameArea, near, similarity, daysAgo }),
+      };
     }
   }
 

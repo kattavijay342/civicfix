@@ -23,7 +23,9 @@ export function DepartmentAnalyticsTable({ departments }: { departments: Departm
               <td className="px-5 py-3 text-foreground-muted">{d.resolvedIssues}</td>
               <td className="px-5 py-3 text-foreground-muted">{d.pendingIssues}</td>
               <td className="px-5 py-3 font-semibold text-civic-700">{d.resolutionRate}%</td>
-              <td className="px-5 py-3 text-foreground-muted">{d.onTimeRate}%</td>
+              <td className="px-5 py-3 text-xs text-foreground-muted">
+                {d.onTimeRate === null ? "No configured SLA" : `${d.onTimeRate}%`}
+              </td>
               <td className="px-5 py-3 text-foreground-muted">{d.avgResolutionDays.toFixed(1)} days</td>
             </tr>
           ))}

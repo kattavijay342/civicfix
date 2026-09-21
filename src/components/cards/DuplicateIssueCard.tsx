@@ -34,7 +34,9 @@ export function DuplicateIssueCard({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-foreground">Similar Issue Detected</p>
+            <p className="text-sm font-semibold text-foreground">
+              {group.relationType === "related" ? "Related Issue Detected" : "Possible Duplicate Detected"}
+            </p>
             {dismissible && (
               <button
                 type="button"
@@ -47,9 +49,11 @@ export function DuplicateIssueCard({
             )}
           </div>
           <p className="mt-1 text-xs leading-relaxed text-foreground-muted">
-            This report appears similar to {group.similarCount} existing reports nearby, including{" "}
+            This report appears {group.relationType === "related" ? "related to" : "similar to"}{" "}
+            {group.similarCount} existing report{group.similarCount === 1 ? "" : "s"} nearby, including{" "}
             &ldquo;{group.primary.title}&rdquo; near {locationHeadline(group.primary.location)}.
           </p>
+          {group.reason && <p className="mt-1 text-[11px] text-foreground-muted/80">Why: {group.reason}</p>}
 
           <dl className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
             {distance && (

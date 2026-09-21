@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, ArrowRight, Sparkles, AlertTriangle } from "lucide-react";
@@ -39,6 +39,22 @@ export function ReportForm({ profile }: { profile: Profile }) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<{ id: string; title: string } | null>(null);
   const [step, setStep] = useState<"form" | "review">("form");
+
+  // Stable per distinct submit attempt (Step 9: idempotency). Keyed by the
+  // options signature so a repeated click/retry of the SAME attempt (e.g. a
+  // double-click on "Submit anyway") reuses the same key and can never
+  // create two reports, while a materially different attempt (confirming
+  // past a duplicate warning) gets its own fresh key instead of replaying
+  // the earlier "duplicate" response forever.
+  const idempotencyKeysRef = useRef(new Map<string, string>());
+  function idempotencyKeyFor(options: { confirmDuplicate?: boolean; duplicateOf?: string }): string {
+    const cacheKey = JSON.stringify(options);
+    const existing = idempotencyKeysRef.current.get(cacheKey);
+    if (existing) return existing;
+    const next = crypto.randomUUID();
+    idempotencyKeysRef.current.set(cacheKey, next);
+    return next;
+  }
 
   function handleSelectPhoto(f: File) {
     setFile(f);
@@ -93,6 +109,11 @@ export function ReportForm({ profile }: { profile: Profile }) {
   async function submitReport(options: { confirmDuplicate?: boolean; duplicateOf?: string } = {}) {
     setSubmitting(true);
     setSubmitError(null);
+    // Clear any earlier duplicate banner before this attempt's own result
+    // comes back — otherwise "Submit anyway" leaves the same banner (and
+    // its own buttons) visible on screen indefinitely, even once this
+    // retry has already succeeded or failed for an unrelated reason.
+    setDuplicate(null);
 
     const fd = new FormData();
     fd.set("description", description.trim());
@@ -100,6 +121,7 @@ export function ReportForm({ profile }: { profile: Profile }) {
     fd.set("location", JSON.stringify(location));
     fd.set("reporterName", reporterName.trim());
     fd.set("reporterMobile", formatIndianMobile(reporterMobile));
+    fd.set("idempotencyKey", idempotencyKeyFor(options));
     if (file) fd.set("photo", file);
     if (options.confirmDuplicate) {
       fd.set("confirmDuplicate", "true");
@@ -192,7 +214,7 @@ export function ReportForm({ profile }: { profile: Profile }) {
               </div>
             )}
             {submitError && (
-              <p className="mb-4 rounded-xl bg-priority-critical-bg px-4 py-2.5 text-sm text-priority-critical">
+              <p role="alert" className="mb-4 rounded-xl bg-priority-critical-bg px-4 py-2.5 text-sm text-priority-critical">
                 {submitError}
               </p>
             )}
@@ -221,19 +243,29 @@ export function ReportForm({ profile }: { profile: Profile }) {
             </section>
 
             <section className="rounded-2xl border border-border bg-white p-6">
-              <h2 className="text-sm font-semibold text-foreground">Problem Description</h2>
+              <h2 className="text-sm font-semibold text-foreground" id="description-label">
+                Problem Description
+              </h2>
               <textarea
+                id="description"
+                aria-labelledby="description-label"
+                aria-invalid={!!errors.description}
+                aria-describedby={errors.description ? "description-error" : undefined}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 rows={4}
                 placeholder="Describe the civic problem... e.g. There's a large pothole in the middle of the road that's been growing after the rain."
                 className="mt-3 w-full rounded-xl border border-border bg-surface-muted/40 px-4 py-3 text-sm leading-relaxed text-foreground placeholder:text-foreground-muted/70 focus-visible:border-civic-400"
               />
-              {errors.description && <p className="mt-1.5 text-xs font-medium text-priority-critical">{errors.description}</p>}
+              {errors.description && (
+                <p id="description-error" role="alert" className="mt-1.5 text-xs font-medium text-priority-critical">
+                  {errors.description}
+                </p>
+              )}
             </section>
 
-            <section className="rounded-2xl border border-border bg-white p-6">
-              <h2 className="text-sm font-semibold text-foreground">Problem Category</h2>
+            <fieldset className="rounded-2xl border border-border bg-white p-6">
+              <legend className="px-0 text-sm font-semibold text-foreground">Problem Category</legend>
               <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
                 {categoryOrder.map((cat) => {
                   const Icon = categoryIcons[cat];
@@ -242,6 +274,7 @@ export function ReportForm({ profile }: { profile: Profile }) {
                     <button
                       key={cat}
                       type="button"
+                      aria-pressed={selected}
                       onClick={() => setCategory(cat)}
                       className={cn(
                         "flex items-center gap-2 rounded-xl border px-3 py-2.5 text-left text-xs font-medium transition",
@@ -256,8 +289,12 @@ export function ReportForm({ profile }: { profile: Profile }) {
                   );
                 })}
               </div>
-              {errors.category && <p className="mt-2 text-xs font-medium text-priority-critical">{errors.category}</p>}
-            </section>
+              {errors.category && (
+                <p role="alert" className="mt-2 text-xs font-medium text-priority-critical">
+                  {errors.category}
+                </p>
+              )}
+            </fieldset>
 
             <SmartLocationField value={location} onChange={handleLocationChange} error={errors.location} />
 

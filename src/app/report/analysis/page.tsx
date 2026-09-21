@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight, Sparkles, Building2, MapPin, AlertTriangle } fro
 import { PriorityBadge } from "@/components/ui/PriorityBadge";
 import { ReportProgress } from "@/components/report/ReportProgress";
 import { JurisdictionChain } from "@/components/cards/JurisdictionChain";
+import { AIAnalysisDetails } from "@/components/cards/AIAnalysisDetails";
 import { categoryLabels } from "@/lib/categories";
 import { getReportDetail } from "@/lib/data/report-detail";
 import { RetryAnalysisButton } from "./RetryAnalysisButton";
@@ -84,15 +85,20 @@ export default async function AnalysisPage({
                 <div className="rounded-2xl border border-priority-medium/30 bg-priority-medium-bg p-5">
                   <p className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
                     <AlertTriangle className="h-4 w-4 text-priority-medium" aria-hidden="true" />
-                    Flagged as a possible duplicate
+                    {report.duplicateOf.relationType === "related"
+                      ? "Flagged as a related issue"
+                      : "Flagged as a possible duplicate"}
                   </p>
                   <p className="mt-1.5 text-sm text-foreground-muted">
-                    Similar to{" "}
+                    {report.duplicateOf.relationType === "related" ? "Related to" : "Similar to"}{" "}
                     <Link href={`/reports/${report.duplicateOf.id}`} className="font-medium text-civic-700 hover:underline">
                       &ldquo;{report.duplicateOf.title}&rdquo;
                     </Link>
                     . A government reviewer will check both.
                   </p>
+                  {report.duplicateOf.reason && (
+                    <p className="mt-1.5 text-xs text-foreground-muted">Why: {report.duplicateOf.reason}</p>
+                  )}
                 </div>
               )}
             </div>
@@ -156,12 +162,7 @@ export default async function AnalysisPage({
                     </p>
                   </div>
 
-                  <div className="border-t border-border pt-4">
-                    <span className="text-xs font-medium uppercase tracking-wide text-foreground-muted">
-                      AI Reasoning
-                    </span>
-                    <p className="mt-1.5 text-sm leading-relaxed text-foreground-muted">{aiAnalysis.reasoning}</p>
-                  </div>
+                  <AIAnalysisDetails aiAnalysis={aiAnalysis} />
                 </div>
               </div>
 

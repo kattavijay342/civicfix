@@ -40,12 +40,18 @@ export function ReporterDetailsField({
             value={name}
             onChange={(e) => onNameChange(e.target.value)}
             placeholder="Enter your name"
+            aria-invalid={!!nameError}
+            aria-describedby={nameError ? "reporter-name-error" : undefined}
             className={cn(
-              "mt-1.5 w-full rounded-lg border bg-white px-3 py-2.5 text-sm text-foreground focus-visible:border-civic-400",
+              "mt-1.5 w-full rounded-lg border bg-white px-3 py-2.5 text-sm text-foreground focus-visible:border-civic-400 focus-visible:ring-2 focus-visible:ring-civic-100",
               nameError ? "border-priority-critical" : "border-border",
             )}
           />
-          {nameError && <p className="mt-1 text-xs font-medium text-priority-critical">{nameError}</p>}
+          {nameError && (
+            <p id="reporter-name-error" role="alert" className="mt-1 text-xs font-medium text-priority-critical">
+              {nameError}
+            </p>
+          )}
         </div>
 
         <div>
@@ -54,7 +60,7 @@ export function ReporterDetailsField({
           </label>
           <div
             className={cn(
-              "mt-1.5 flex items-center rounded-lg border bg-white pl-3 focus-within:border-civic-400",
+              "mt-1.5 flex items-center rounded-lg border bg-white pl-3 focus-within:border-civic-400 focus-within:ring-2 focus-within:ring-civic-100",
               mobileError ? "border-priority-critical" : "border-border",
             )}
           >
@@ -67,10 +73,16 @@ export function ReporterDetailsField({
               value={mobile}
               onChange={(e) => onMobileChange(e.target.value.replace(/\D/g, "").slice(0, 10))}
               placeholder="XXXXX XXXXX"
+              aria-invalid={!!mobileError}
+              aria-describedby={mobileError ? "reporter-mobile-error" : undefined}
               className="w-full bg-transparent px-2 py-2.5 text-sm text-foreground focus-visible:outline-none"
             />
           </div>
-          {mobileError && <p className="mt-1 text-xs font-medium text-priority-critical">{mobileError}</p>}
+          {mobileError && (
+            <p id="reporter-mobile-error" role="alert" className="mt-1 text-xs font-medium text-priority-critical">
+              {mobileError}
+            </p>
+          )}
         </div>
       </div>
 

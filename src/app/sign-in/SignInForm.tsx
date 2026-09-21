@@ -17,11 +17,15 @@ export function SignInForm() {
 
   return (
     <div className="rounded-2xl border border-border bg-white p-6 shadow-sm sm:p-8">
-      <div className="mb-6 flex rounded-full bg-surface-muted p-1">
+      <div role="tablist" aria-label="Sign in or sign up" className="mb-6 flex rounded-full bg-surface-muted p-1">
         {(["sign-in", "sign-up"] as const).map((t) => (
           <button
             key={t}
             type="button"
+            role="tab"
+            id={`${t}-tab`}
+            aria-selected={tab === t}
+            aria-controls={`${t}-panel`}
             onClick={() => setTab(t)}
             className={cn(
               "flex-1 rounded-full py-2 text-sm font-semibold transition",
@@ -34,21 +38,33 @@ export function SignInForm() {
       </div>
 
       {tab === "sign-in" ? (
-        <form action={signInAction} className="flex flex-col gap-4">
-          <Field label="Email" name="email" type="email" required autoComplete="email" />
-          <Field label="Password" name="password" type="password" required autoComplete="current-password" />
-          <FormError state={signInState} />
+        <form
+          action={signInAction}
+          id="sign-in-panel"
+          role="tabpanel"
+          aria-labelledby="sign-in-tab"
+          className="flex flex-col gap-4"
+        >
+          <Field label="Email" name="email" type="email" required autoComplete="email" errorId={signInState.error ? "signin-form-error" : undefined} />
+          <Field label="Password" name="password" type="password" required autoComplete="current-password" errorId={signInState.error ? "signin-form-error" : undefined} />
+          <FormError state={signInState} id="signin-form-error" />
           <SubmitButton pending={signInPending} label="Sign In" />
         </form>
       ) : (
-        <form action={signUpAction} className="flex flex-col gap-4">
+        <form
+          action={signUpAction}
+          id="sign-up-panel"
+          role="tabpanel"
+          aria-labelledby="sign-up-tab"
+          className="flex flex-col gap-4"
+        >
           <p className="rounded-xl bg-civic-50 px-3.5 py-2.5 text-xs text-civic-800">
             This creates a <strong>citizen</strong> account. Government and department accounts are
             provisioned by an administrator, not through self sign-up.
           </p>
-          <Field label="Full name" name="fullName" type="text" required autoComplete="name" />
-          <Field label="Mobile number" name="mobile" type="tel" required autoComplete="tel" placeholder="10-digit mobile number" />
-          <Field label="Email" name="email" type="email" required autoComplete="email" />
+          <Field label="Full name" name="fullName" type="text" required autoComplete="name" errorId={signUpState.error ? "signup-form-error" : undefined} />
+          <Field label="Mobile number" name="mobile" type="tel" required autoComplete="tel" placeholder="10-digit mobile number" errorId={signUpState.error ? "signup-form-error" : undefined} />
+          <Field label="Email" name="email" type="email" required autoComplete="email" errorId={signUpState.error ? "signup-form-error" : undefined} />
           <Field
             label="Password"
             name="password"
@@ -56,8 +72,9 @@ export function SignInForm() {
             required
             autoComplete="new-password"
             minLength={8}
+            errorId={signUpState.error ? "signup-form-error" : undefined}
           />
-          <FormError state={signUpState} />
+          <FormError state={signUpState} id="signup-form-error" />
           <SubmitButton pending={signUpPending} label="Create account" />
         </form>
       )}
@@ -68,20 +85,27 @@ export function SignInForm() {
 function Field({
   label,
   name,
+  errorId,
   ...rest
-}: { label: string; name: string } & React.InputHTMLAttributes<HTMLInputElement>) {
+}: { label: string; name: string; errorId?: string } & React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <label className="flex flex-col gap-1.5">
       <span className="text-sm font-medium text-foreground">{label}</span>
-      <input name={name} className={inputClasses} {...rest} />
+      <input
+        name={name}
+        className={inputClasses}
+        aria-invalid={!!errorId}
+        aria-describedby={errorId}
+        {...rest}
+      />
     </label>
   );
 }
 
-function FormError({ state }: { state: AuthFormState }) {
+function FormError({ state, id }: { state: AuthFormState; id: string }) {
   if (!state.error) return null;
   return (
-    <p className="flex items-center gap-1.5 rounded-lg bg-priority-critical-bg px-3 py-2 text-sm text-priority-critical">
+    <p id={id} role="alert" className="flex items-center gap-1.5 rounded-lg bg-priority-critical-bg px-3 py-2 text-sm text-priority-critical">
       <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
       {state.error}
     </p>

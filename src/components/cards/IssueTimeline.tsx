@@ -18,6 +18,11 @@ const completedCountByStatus: Record<IssueStatus, number> = {
   ACKNOWLEDGED: 4,
   IN_PROGRESS: 5,
   RESOLVED: 6,
+  // Sample data never generates a reopened issue (see src/lib/sample-data.ts)
+  // — this is only here for type completeness. Real reopened reports use
+  // RealStatusTimeline instead, which renders the actual event, not this
+  // synthetic linear bar.
+  REOPENED: 4,
 };
 
 export function IssueTimeline({ status }: { status: IssueStatus }) {

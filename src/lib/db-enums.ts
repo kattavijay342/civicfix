@@ -46,6 +46,7 @@ export const statusToDb: Record<IssueStatus, string> = {
   ACKNOWLEDGED: "acknowledged",
   IN_PROGRESS: "in_progress",
   RESOLVED: "resolved",
+  REOPENED: "reopened",
 };
 export const statusFromDb = invert(statusToDb) as Record<string, IssueStatus>;
 export const dbStatusValues = Object.values(statusToDb) as [string, ...string[]];
