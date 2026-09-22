@@ -15,29 +15,39 @@ export interface RateLimitResult {
  * which is not reachable by anon/authenticated roles — only this
  * service-role call can invoke it.
  *
- * Fails OPEN on a database error (logged, never thrown): a broken limiter
- * should not become a second way to take the whole app down, and if the
+ * Fails OPEN on ANY failure of the rate-limit subsystem itself (logged,
+ * never thrown) — including the admin client failing to construct (e.g.
+ * missing/misconfigured SUPABASE_SERVICE_ROLE_KEY) as well as the RPC call
+ * itself failing. A broken limiter should not become a second way to take
+ * the whole app down — including blocking sign-in entirely — and if the
  * database is unreachable the request is about to fail for other reasons
- * anyway. This is a deliberate tradeoff — see the Phase 4 report.
+ * anyway. This is a deliberate tradeoff — see the Phase 4 report. This must
+ * never mask a genuine Supabase Auth failure — callers only reach Auth once
+ * this returns `allowed`.
  */
 export async function checkRateLimit(key: string, limit: number, windowSeconds: number): Promise<RateLimitResult> {
-  const admin = createAdminClient();
-  const { data, error } = await admin.rpc("check_rate_limit", {
-    p_key: key,
-    p_limit: limit,
-    p_window_seconds: windowSeconds,
-  });
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin.rpc("check_rate_limit", {
+      p_key: key,
+      p_limit: limit,
+      p_window_seconds: windowSeconds,
+    });
 
-  if (error) {
-    console.error("Rate limit check failed; failing open", error);
+    if (error) {
+      console.error("Rate limit check failed; failing open", error);
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    return {
+      allowed: row?.allowed ?? true,
+      retryAfterSeconds: row?.retry_after_seconds ?? 0,
+    };
+  } catch (err) {
+    console.error("Rate limit subsystem unavailable; failing open", err);
     return { allowed: true, retryAfterSeconds: 0 };
   }
-
-  const row = Array.isArray(data) ? data[0] : data;
-  return {
-    allowed: row?.allowed ?? true,
-    retryAfterSeconds: row?.retry_after_seconds ?? 0,
-  };
 }
 
 /** Human-readable "try again in..." for Server Action error states. */

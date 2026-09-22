@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CivicFix — See a problem. Turn it into action.",
+  title: "CivicFix – AI-Powered Civic Issue Management",
   description:
     "CivicFix is an AI-powered civic issue reporting, routing, monitoring, and follow-up platform. Report a problem, let AI understand and route it to the right department, and track progress until resolution.",
 };

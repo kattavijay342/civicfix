@@ -64,8 +64,8 @@ export function Hero() {
             </span>
           </h1>
           <p className="mt-5 max-w-xl text-lg leading-relaxed text-foreground-muted">
-            CivicFix uses AI to understand everyday civic problems and turn them into clear,
-            actionable reports.
+            Report civic issues and automatically route them to the appropriate government
+            department using AI.
           </p>
           <div className="mt-7 flex flex-col gap-3 sm:flex-row sm:items-center">
             <CTAButton href="/report" size="lg" className="shadow-[0_12px_28px_-12px_rgba(31,122,81,0.55)]">
