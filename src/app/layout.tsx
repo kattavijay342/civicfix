@@ -20,6 +20,9 @@ export const metadata: Metadata = {
   title: "CivicFix – AI-Powered Civic Issue Management",
   description:
     "CivicFix is an AI-powered civic issue reporting, routing, monitoring, and follow-up platform. Report a problem, let AI understand and route it to the right department, and track progress until resolution.",
+  verification: {
+    google: "msgVM5FHotAkyOKNSyRPjRdYlXQrOz5HiWiYM5LLxjs",
+  },
 };
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
