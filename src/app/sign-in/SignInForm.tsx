@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
-import { AlertCircle, Loader2 } from "lucide-react";
+import { AlertCircle, Loader2, MailCheck } from "lucide-react";
 import { signIn, signUp, type AuthFormState } from "@/lib/actions/auth";
 import { cn } from "@/lib/utils";
 
@@ -10,13 +10,29 @@ const initialState: AuthFormState = {};
 const inputClasses =
   "w-full rounded-xl border border-border bg-white px-3.5 py-2.5 text-sm text-foreground placeholder:text-foreground-muted/70 outline-none transition focus:border-civic-400 focus:ring-2 focus:ring-civic-100";
 
-export function SignInForm() {
+interface SignInFormProps {
+  /** A safe, pre-mapped message from a redirect out of
+   * src/app/auth/callback/route.ts — never raw query input. */
+  callbackError?: string;
+}
+
+export function SignInForm({ callbackError }: SignInFormProps) {
   const [tab, setTab] = useState<"sign-in" | "sign-up">("sign-in");
   const [signInState, signInAction, signInPending] = useActionState(signIn, initialState);
   const [signUpState, signUpAction, signUpPending] = useActionState(signUp, initialState);
 
   return (
     <div className="rounded-2xl border border-border bg-white p-6 shadow-sm sm:p-8">
+      {callbackError && (
+        <p
+          role="alert"
+          className="mb-6 flex items-center gap-1.5 rounded-lg bg-priority-critical-bg px-3 py-2 text-sm text-priority-critical"
+        >
+          <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+          {callbackError}
+        </p>
+      )}
+
       <div role="tablist" aria-label="Sign in or sign up" className="mb-6 flex rounded-full bg-surface-muted p-1">
         {(["sign-in", "sign-up"] as const).map((t) => (
           <button
@@ -50,6 +66,17 @@ export function SignInForm() {
           <FormError state={signInState} id="signin-form-error" />
           <SubmitButton pending={signInPending} label="Sign In" />
         </form>
+      ) : signUpState.info ? (
+        <div id="sign-up-panel" role="tabpanel" aria-labelledby="sign-up-tab" className="flex flex-col gap-4">
+          <InfoMessage message={signUpState.info} />
+          <button
+            type="button"
+            onClick={() => setTab("sign-in")}
+            className="mt-1 inline-flex items-center justify-center gap-2 rounded-full bg-civic-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-civic-700"
+          >
+            Go to Sign In
+          </button>
+        </div>
       ) : (
         <form
           action={signUpAction}
@@ -109,6 +136,23 @@ function FormError({ state, id }: { state: AuthFormState; id: string }) {
       <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
       {state.error}
     </p>
+  );
+}
+
+/** Success-with-a-next-step, not a failure — deliberately styled and
+ * announced differently from FormError (civic green + MailCheck icon,
+ * `role="status"` rather than `role="alert"`) so it can never be mistaken
+ * for something having gone wrong. */
+function InfoMessage({ message }: { message: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex items-start gap-2 rounded-xl bg-civic-50 px-3.5 py-3 text-sm text-civic-800"
+    >
+      <MailCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+      <span>{message}</span>
+    </div>
   );
 }
 

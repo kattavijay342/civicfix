@@ -9,6 +9,7 @@ import { RealStatusTimeline } from "@/components/cards/RealStatusTimeline";
 import { BeforeAfterCard } from "@/components/cards/BeforeAfterCard";
 import { AIAnalysisDetails } from "@/components/cards/AIAnalysisDetails";
 import { DuplicateIssueCard } from "@/components/cards/DuplicateIssueCard";
+import { CitizenIncidentNote } from "@/components/cards/CitizenIncidentNote";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { CTAButton } from "@/components/ui/CTAButton";
 import { sampleIssues } from "@/lib/sample-data";
@@ -18,6 +19,7 @@ import { agingLabel, agingClass } from "@/lib/aging";
 import { locationHeadline, locationBreakdown } from "@/lib/location-format";
 import { getReportDetail } from "@/lib/data/report-detail";
 import { getReportReminders } from "@/lib/data/reminders";
+import { getCitizenIncidentNote } from "@/lib/data/incidents";
 import { getSessionProfile } from "@/lib/supabase/server";
 import { buildCitizenSummary, STATUS_EXPLANATIONS } from "@/lib/citizen-summary";
 import { RetryAnalysisButton } from "@/app/report/analysis/RetryAnalysisButton";
@@ -96,6 +98,7 @@ async function RealReportDetail({ id }: { id: string }) {
 
   const reminders = session ? await getReportReminders(report.id, session.user.id) : [];
   const isOwner = session?.user.id === report.reporterId;
+  const incidentNote = isOwner ? await getCitizenIncidentNote(report.id) : null;
   const isGovOrAdmin = session?.profile.role === "government" || session?.profile.role === "admin";
   const aiPending = !report.aiAnalysis && report.status === "REPORTED";
   // agingLabel() treats 0 as "Resolved", so an unresolved same-day report
@@ -192,6 +195,12 @@ async function RealReportDetail({ id }: { id: string }) {
             <span className="font-medium text-foreground">Next:</span> {STATUS_EXPLANATIONS[report.status].nextStep.en}
           </p>
         </div>
+
+        {incidentNote && (
+          <div className="mt-4">
+            <CitizenIncidentNote note={incidentNote} />
+          </div>
+        )}
 
         <div className="mt-8 grid gap-6 lg:grid-cols-[1.2fr_1fr]">
           <div className="flex flex-col gap-6">

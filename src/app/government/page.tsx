@@ -16,6 +16,7 @@ import { ResolutionQualityCard } from "@/components/cards/ResolutionQualityCard"
 import { WorkloadDistribution } from "@/components/cards/WorkloadDistribution";
 import { DepartmentTrendCard } from "@/components/cards/DepartmentTrendCard";
 import { FollowUpCenter } from "@/components/cards/FollowUpCenter";
+import { IncidentsSection } from "@/components/cards/IncidentsSection";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { statusLabels } from "@/components/ui/StatusBadge";
 import { categoryLabels } from "@/lib/categories";
@@ -35,6 +36,7 @@ import {
   getActionCenterCounts,
 } from "@/lib/data/government";
 import { getFollowUpCenter } from "@/lib/data/reminders";
+import { getIncidentList } from "@/lib/data/incidents";
 import { buildGovernmentMetricsSnapshot, generateGovernmentAIInsights } from "@/lib/government-insights-ai";
 import type { AIInsight } from "@/lib/types";
 
@@ -92,6 +94,7 @@ export default async function GovernmentDashboardPage() {
     needsAttention,
     actionCounts,
     followUpCenter,
+    incidents,
   ] = await Promise.all([
     getGovernmentIssues(),
     getAreaOverview(),
@@ -106,6 +109,7 @@ export default async function GovernmentDashboardPage() {
     getNeedsAttention(),
     getActionCenterCounts(),
     getFollowUpCenter(),
+    getIncidentList(),
   ]);
 
   const followUpIssues = issues.filter((i) => i.lastFollowUp);
@@ -191,6 +195,18 @@ export default async function GovernmentDashboardPage() {
               <p className="mt-1 text-sm text-foreground-muted">Where to focus today — real, linked issues.</p>
               <div className="mt-4">
                 <AttentionRequiredSection needsAttention={needsAttention} actionCounts={actionCounts} basePath="/government/issues" />
+              </div>
+            </section>
+
+            {/* B2. Civic Incidents */}
+            <section className="mt-10">
+              <h2 className="text-lg font-semibold text-foreground">Civic Incidents</h2>
+              <p className="mt-1 text-sm text-foreground-muted">
+                Multiple citizen reports that likely describe the same real-world problem, grouped so a
+                department can resolve it once.
+              </p>
+              <div className="mt-4">
+                <IncidentsSection incidents={incidents} />
               </div>
             </section>
 

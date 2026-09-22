@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Menu, X, MapPinned, LogOut, Bell } from "lucide-react";
+import { Menu, X, Landmark, LogOut, Bell, User, CirclePlus } from "lucide-react";
 import { CTAButton } from "@/components/ui/CTAButton";
 import { cn } from "@/lib/utils";
 import { signOut } from "@/lib/actions/auth";
@@ -14,10 +14,10 @@ const navLinks = [
   { label: "How It Works", href: "/#how-it-works" },
   { label: "Issues", href: "/#explore" },
   { label: "About", href: "/#about" },
+  { label: "Citizen", href: "/dashboard" },
 ];
 
 const roleLabels: Record<string, string> = {
-  citizen: "Citizen",
   government: "Authorized Government User",
   department_incharge: "Department In-charge",
   admin: "Admin",
@@ -26,10 +26,15 @@ const roleLabels: Record<string, string> = {
 export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; unreadCount?: number }) {
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const homeLink = profile
-    ? { label: roleLabels[profile.role] ?? "Dashboard", href: roleHomePath(profile.role) }
-    : null;
+  // "Citizen" is always in navLinks and already points at /dashboard, so a
+  // signed-in citizen doesn't need a second, redundant link to the same
+  // place — only government/department/admin get an extra role-home link.
+  const homeLink =
+    profile && profile.role !== "citizen"
+      ? { label: roleLabels[profile.role] ?? "Dashboard", href: roleHomePath(profile.role) }
+      : null;
   const links = homeLink ? [...navLinks, homeLink] : navLinks;
+  const notificationsHref = profile ? "/notifications" : "/sign-in";
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -67,10 +72,15 @@ export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; 
           className="flex items-center gap-2 rounded-md text-foreground"
           onClick={() => setMobileOpen(false)}
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-civic-600 text-white">
-            <MapPinned className="h-4.5 w-4.5" aria-hidden="true" />
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-civic-600 text-white">
+            <Landmark className="h-4.5 w-4.5" aria-hidden="true" />
           </span>
-          <span className="text-[17px] font-semibold tracking-tight">CivicFix</span>
+          <span className="leading-tight">
+            <span className="block text-[17px] font-semibold tracking-tight">CivicFix</span>
+            <span className="hidden text-[11px] font-medium text-foreground-muted sm:block">
+              Stronger Communities. Better Cities.
+            </span>
+          </span>
         </Link>
 
         <ul className="hidden items-center gap-1 lg:flex">
@@ -87,39 +97,42 @@ export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; 
         </ul>
 
         <div className="hidden items-center gap-2 lg:flex">
+          <Link
+            href={notificationsHref}
+            aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+            className="relative inline-flex h-10 w-10 items-center justify-center rounded-full text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
+          >
+            <Bell className="h-4.5 w-4.5" aria-hidden="true" />
+            {unreadCount > 0 && (
+              <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
+                {unreadCount > 9 ? "9+" : unreadCount}
+              </span>
+            )}
+          </Link>
+
+          <span className="h-6 w-px bg-border" aria-hidden="true" />
+
           {profile ? (
-            <>
-              <Link
-                href="/notifications"
-                aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
-                className="relative inline-flex h-10 w-10 items-center justify-center rounded-full text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
+            <form action={signOut}>
+              <button
+                type="submit"
+                className="inline-flex items-center gap-1.5 rounded-full border border-border px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:border-civic-300 hover:bg-surface-muted hover:text-foreground"
               >
-                <Bell className="h-4.5 w-4.5" aria-hidden="true" />
-                {unreadCount > 0 && (
-                  <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
-                    {unreadCount > 9 ? "9+" : unreadCount}
-                  </span>
-                )}
-              </Link>
-              <form action={signOut}>
-                <button
-                  type="submit"
-                  className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
-                >
-                  <LogOut className="h-4 w-4" aria-hidden="true" />
-                  Sign Out
-                </button>
-              </form>
-            </>
+                <LogOut className="h-4 w-4" aria-hidden="true" />
+                Sign Out
+              </button>
+            </form>
           ) : (
             <Link
               href="/sign-in"
-              className="rounded-full px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:bg-surface-muted hover:text-foreground"
+              className="inline-flex items-center gap-1.5 rounded-full border border-border px-3.5 py-2 text-sm font-medium text-foreground-muted transition-colors hover:border-civic-300 hover:bg-surface-muted hover:text-foreground"
             >
+              <User className="h-4 w-4" aria-hidden="true" />
               Sign In
             </Link>
           )}
           <CTAButton href="/report" size="md">
+            <CirclePlus className="h-4 w-4" aria-hidden="true" />
             Report a Problem
           </CTAButton>
         </div>
@@ -155,41 +168,41 @@ export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; 
             ))}
           </ul>
           <div className="mt-4 flex flex-col gap-2 border-t border-border pt-4">
+            <Link
+              href={notificationsHref}
+              onClick={() => setMobileOpen(false)}
+              className="flex w-full items-center justify-center gap-1.5 rounded-full px-3.5 py-2.5 text-sm font-medium text-foreground-muted hover:bg-surface-muted"
+            >
+              <Bell className="h-4 w-4" aria-hidden="true" />
+              Notifications
+              {unreadCount > 0 && (
+                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
+                  {unreadCount > 9 ? "9+" : unreadCount}
+                </span>
+              )}
+            </Link>
             {profile ? (
-              <>
-                <Link
-                  href="/notifications"
-                  onClick={() => setMobileOpen(false)}
+              <form action={signOut}>
+                <button
+                  type="submit"
                   className="flex w-full items-center justify-center gap-1.5 rounded-full px-3.5 py-2.5 text-sm font-medium text-foreground-muted hover:bg-surface-muted"
                 >
-                  <Bell className="h-4 w-4" aria-hidden="true" />
-                  Notifications
-                  {unreadCount > 0 && (
-                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-priority-critical px-1 text-[10px] font-semibold text-white">
-                      {unreadCount > 9 ? "9+" : unreadCount}
-                    </span>
-                  )}
-                </Link>
-                <form action={signOut}>
-                  <button
-                    type="submit"
-                    className="flex w-full items-center justify-center gap-1.5 rounded-full px-3.5 py-2.5 text-sm font-medium text-foreground-muted hover:bg-surface-muted"
-                  >
-                    <LogOut className="h-4 w-4" aria-hidden="true" />
-                    Sign Out
-                  </button>
-                </form>
-              </>
+                  <LogOut className="h-4 w-4" aria-hidden="true" />
+                  Sign Out
+                </button>
+              </form>
             ) : (
               <Link
                 href="/sign-in"
                 onClick={() => setMobileOpen(false)}
-                className="rounded-full px-3.5 py-2.5 text-center text-sm font-medium text-foreground-muted hover:bg-surface-muted"
+                className="flex items-center justify-center gap-1.5 rounded-full px-3.5 py-2.5 text-center text-sm font-medium text-foreground-muted hover:bg-surface-muted"
               >
+                <User className="h-4 w-4" aria-hidden="true" />
                 Sign In
               </Link>
             )}
             <CTAButton href="/report" size="md" className="w-full">
+              <CirclePlus className="h-4 w-4" aria-hidden="true" />
               Report a Problem
             </CTAButton>
           </div>

@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { analyzeReport, AIUnavailableError } from "@/lib/ai";
 import { findPossibleDuplicate } from "@/lib/duplicate-detection";
+import { evaluateIncidentForReport } from "@/lib/incident-linking";
 import { resolveAssignment } from "@/lib/actions/routing";
 import { logStatusChange } from "@/lib/actions/status-history";
 import { notifyNewAssignment } from "@/lib/actions/notifications";
@@ -373,6 +374,7 @@ async function performCreateReport(
   }
 
   let aiFailed = false;
+  let completedAnalysis: Awaited<ReturnType<typeof analyzeReport>> | null = null;
   try {
     const analysis = await analyzeWithRetry({
       description,
@@ -381,6 +383,7 @@ async function performCreateReport(
       imageBase64,
       imageMimeType,
     });
+    completedAnalysis = analysis;
 
     await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
 
@@ -410,6 +413,27 @@ async function performCreateReport(
   } catch (err) {
     aiFailed = true;
     console.error("AI analysis failed for report", reportId, err);
+  }
+
+  // Civic Incident Intelligence — best-effort, non-fatal, exactly like
+  // duplicate detection above: runs whether or not AI analysis succeeded
+  // (subcategory/severity are used only when available), and never affects
+  // the report that was already fully created above.
+  try {
+    await evaluateIncidentForReport(admin, {
+      reportId,
+      category,
+      subcategory: completedAnalysis?.subcategory ?? null,
+      description,
+      location,
+      createdAt: new Date().toISOString(),
+      severity: completedAnalysis?.severity ?? null,
+      existingDuplicateCandidate: duplicateCandidate
+        ? { reportId: duplicateCandidate.reportId, relationType: duplicateCandidate.relationType }
+        : null,
+    });
+  } catch (err) {
+    console.error("Incident linking failed for report", reportId, err);
   }
 
   return { status: "success", reportId, aiFailed };

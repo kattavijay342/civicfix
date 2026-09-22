@@ -1,31 +1,11 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CivicLocation } from "./types";
+import { haversineMeters } from "./geo";
+import { jaccardSimilarity } from "./text-similarity";
 
 const DUPLICATE_WINDOW_DAYS = 14;
 const NEARBY_METERS = 300;
-
-function jaccardSimilarity(a: string, b: string): number {
-  const wordsOf = (s: string) => new Set(s.toLowerCase().split(/\W+/).filter(Boolean));
-  const setA = wordsOf(a);
-  const setB = wordsOf(b);
-  if (setA.size === 0 || setB.size === 0) return 0;
-  let intersection = 0;
-  for (const w of setA) if (setB.has(w)) intersection++;
-  const union = setA.size + setB.size - intersection;
-  return union === 0 ? 0 : intersection / union;
-}
-
-function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371000;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
-}
 
 export type DuplicateRelationType = "duplicate" | "related";
 

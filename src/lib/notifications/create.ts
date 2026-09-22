@@ -19,6 +19,8 @@ const DEFAULT_PRIORITY: Record<NotificationType, NotificationPriority> = {
   follow_up_recorded: "normal",
   resolution_feedback_recorded: "normal",
   issue_reopened: "high",
+  incident_created: "normal",
+  incident_updated: "normal",
 };
 
 export interface CreateNotificationInput {

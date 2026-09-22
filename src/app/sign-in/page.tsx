@@ -7,7 +7,21 @@ export const metadata: Metadata = {
   title: "Sign In — CivicFix",
 };
 
-export default function SignInPage() {
+/** Internal codes only (set by src/app/auth/callback/route.ts) — never
+ * render an arbitrary query value as a message. */
+const CALLBACK_ERROR_MESSAGES: Record<string, string> = {
+  missing_code: "That confirmation link looks incomplete. Please try the link from your email again.",
+  confirmation_failed: "We couldn't confirm your email — the link may have expired. Try signing up again, or sign in if you've already confirmed.",
+};
+
+export default async function SignInPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const params = await searchParams;
+  const callbackError = params.error ? CALLBACK_ERROR_MESSAGES[params.error] : undefined;
+
   return (
     <div className="mx-auto flex min-h-[70vh] max-w-md flex-col justify-center px-4 py-16 sm:px-6">
       <Link
@@ -25,7 +39,7 @@ export default function SignInPage() {
         </p>
       </div>
 
-      <SignInForm />
+      <SignInForm callbackError={callbackError} />
     </div>
   );
 }

@@ -4,6 +4,9 @@
  * types with a real, wired event behind them. Phase 6D added
  * `resolution_feedback_recorded`/`issue_reopened` once reopening became a
  * real feature of the status lifecycle (src/lib/status-transitions.ts).
+ * Civic Incident Intelligence added `incident_created`/`incident_updated` —
+ * ONE notification per event per recipient regardless of how many linked
+ * reports triggered it (src/lib/incident-linking.ts), never one per report.
  */
 export type NotificationType =
   | "report_created"
@@ -15,7 +18,9 @@ export type NotificationType =
   | "critical_issue"
   | "follow_up_recorded"
   | "resolution_feedback_recorded"
-  | "issue_reopened";
+  | "issue_reopened"
+  | "incident_created"
+  | "incident_updated";
 
 export type NotificationPriority = "low" | "normal" | "high" | "critical";
 
@@ -39,6 +44,8 @@ export const CATEGORY_BY_TYPE: Record<NotificationType, NotificationCategory> = 
   follow_up_recorded: "follow_ups",
   resolution_feedback_recorded: "resolution_updates",
   issue_reopened: "resolution_updates",
+  incident_created: "report_updates",
+  incident_updated: "report_updates",
 };
 
 export const CATEGORY_LABELS: Record<NotificationCategory, string> = {

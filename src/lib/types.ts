@@ -163,3 +163,56 @@ export interface PagedIssues {
   totalCount: number;
   totalPages: number;
 }
+
+/**
+ * Civic Incident Intelligence — a group of citizen reports that likely
+ * describe the same real-world civic problem (see src/lib/incident-detection.ts,
+ * supabase/migrations/0014_incident_intelligence.sql). `status` is already
+ * the LIVE-DERIVED display status (src/lib/incident-status.ts) — a
+ * REOPENED linked report always overrides a stored "resolved", so this
+ * field is never stale.
+ */
+export interface CivicIncident {
+  id: string;
+  incidentCode: string;
+  title: string;
+  category: ProblemCategory;
+  subcategory: string | null;
+  severity: Priority;
+  priority: Priority;
+  status: IssueStatus;
+  department: string | null;
+  location: CivicLocation;
+  /** How confident CivicFix is that this grouping is genuinely one
+   * real-world incident (0-1) — see src/lib/incident-priority.ts. */
+  confidence: number;
+  detectionMethod: "rule_based" | "ai_confirmed";
+  /** Bounded to what the CALLER is authorized to see (RLS-scoped) — never
+   * the incident's true global totals. See get_incident_list()'s own
+   * doc comment in the migration above. */
+  linkedReportCount: number;
+  affectedCitizenCount: number;
+  earliestReportAt: string;
+  latestReportAt: string;
+  anyUnresolved: boolean;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+}
+
+/** A single report's link into an incident, for the incident detail page's
+ * "linked reports" list. */
+export interface IncidentReportLink {
+  report: CivicIssue;
+  relationshipType: "primary" | "duplicate" | "related" | "supporting" | "candidate";
+  confidence: number;
+}
+
+export interface IncidentListFilters {
+  status?: IssueStatus;
+  priority?: Priority;
+  category?: ProblemCategory;
+  department?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}
