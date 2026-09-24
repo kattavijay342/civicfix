@@ -14,6 +14,24 @@ export interface AuthFormState {
   info?: string;
 }
 
+const PRODUCTION_SITE_URL = "https://civicfix-sbte.vercel.app";
+
+/**
+ * Fixed, non-user-controlled origin for the confirmation email's redirect
+ * link — never derived from a request header, so a forged Host can't
+ * redirect a confirmation link off-domain. Without passing this as
+ * `emailRedirectTo`, Supabase falls back to whichever single "Site URL" is
+ * configured in the dashboard, so the link only ever works in one
+ * environment (and may not even point at `/auth/callback`).
+ *
+ * Both this and the localhost URL must also be listed in Supabase
+ * Dashboard -> Authentication -> URL Configuration -> Redirect URLs, or
+ * Supabase will reject the redirect regardless of this code.
+ */
+function getAuthRedirectOrigin(): string {
+  return process.env.NODE_ENV === "production" ? PRODUCTION_SITE_URL : "http://localhost:3000";
+}
+
 /**
  * Public self-registration ALWAYS creates a citizen account. There is no
  * form field or code path here that lets a client choose a different role
@@ -53,6 +71,7 @@ export async function signUp(
     email,
     password,
     options: {
+      emailRedirectTo: `${getAuthRedirectOrigin()}/auth/callback`,
       data: {
         full_name: fullName,
         mobile_number: formatIndianMobile(mobile),
@@ -62,8 +81,21 @@ export async function signUp(
   });
 
   if (error) {
+    console.error("[signUp] Supabase signUp failed", {
+      code: error.code,
+      status: error.status,
+      message: error.message,
+    });
     if (error.message.toLowerCase().includes("already registered")) {
       return { error: "An account with this email already exists. Try signing in instead." };
+    }
+    // Supabase's own confirmation-email send rate limit (distinct from the
+    // app-level checkRateLimit above) — distinguished by Supabase's stable
+    // error code, not a message match. Telling the citizen to wait is
+    // honest; the generic message below would look like their input was
+    // somehow wrong when it wasn't.
+    if (error.code === "over_email_send_rate_limit") {
+      return { error: "We're sending a lot of confirmation emails right now. Please wait a few minutes and try again." };
     }
     return { error: "Unable to create your account. Please try again." };
   }

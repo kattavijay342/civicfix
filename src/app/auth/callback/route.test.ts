@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
 const exchangeCodeForSessionMock = vi.fn();
+const verifyOtpMock = vi.fn();
 const getUserMock = vi.fn();
 const fromMock = vi.fn();
 
@@ -9,6 +10,7 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: {
       exchangeCodeForSession: exchangeCodeForSessionMock,
+      verifyOtp: verifyOtpMock,
       getUser: getUserMock,
     },
     from: fromMock,
@@ -29,6 +31,7 @@ function profilesRoleQuery(role: string | null) {
 
 beforeEach(() => {
   exchangeCodeForSessionMock.mockReset();
+  verifyOtpMock.mockReset();
   getUserMock.mockReset();
   fromMock.mockReset();
 });
@@ -92,5 +95,50 @@ describe("GET /auth/callback", () => {
     const response = await GET(request);
 
     expect(response.headers.get("location")).toBe("http://localhost:3000/dashboard");
+  });
+
+  describe("token_hash flow (Supabase's default 'Confirm signup' email template)", () => {
+    it("verifies via token_hash + type and redirects to the correct role home on success", async () => {
+      verifyOtpMock.mockResolvedValue({ error: null });
+      getUserMock.mockResolvedValue({ data: { user: { id: "gov-1" } } });
+      fromMock.mockReturnValue(profilesRoleQuery("government"));
+      const request = new NextRequest("http://localhost:3000/auth/callback?token_hash=good-hash&type=email");
+
+      const response = await GET(request);
+
+      expect(verifyOtpMock).toHaveBeenCalledWith({ token_hash: "good-hash", type: "email" });
+      expect(exchangeCodeForSessionMock).not.toHaveBeenCalled();
+      expect(response.headers.get("location")).toBe("http://localhost:3000/government");
+    });
+
+    it("redirects safely to /sign-in without exposing the raw Supabase error when verifyOtp fails", async () => {
+      verifyOtpMock.mockResolvedValue({ error: { message: "otp expired: some internal detail" } });
+      const request = new NextRequest("http://localhost:3000/auth/callback?token_hash=expired-hash&type=email");
+
+      const response = await GET(request);
+
+      expect(response.headers.get("location")).toBe("http://localhost:3000/sign-in?error=confirmation_failed");
+      expect(response.headers.get("location")).not.toContain("internal detail");
+    });
+
+    it("treats a token_hash with no type as an incomplete link, never calling verifyOtp", async () => {
+      const request = new NextRequest("http://localhost:3000/auth/callback?token_hash=good-hash");
+
+      const response = await GET(request);
+
+      expect(response.headers.get("location")).toBe("http://localhost:3000/sign-in?error=missing_code");
+      expect(verifyOtpMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects an unrecognized type value instead of passing it through to verifyOtp", async () => {
+      const request = new NextRequest(
+        "http://localhost:3000/auth/callback?token_hash=good-hash&type=not_a_real_type"
+      );
+
+      const response = await GET(request);
+
+      expect(response.headers.get("location")).toBe("http://localhost:3000/sign-in?error=missing_code");
+      expect(verifyOtpMock).not.toHaveBeenCalled();
+    });
   });
 });

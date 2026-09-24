@@ -89,6 +89,20 @@ describe("signUp", () => {
     expect(result.info).toMatch(/confirmation link/i);
   });
 
+  it("sends a fixed emailRedirectTo pointing at /auth/callback, never left for Supabase's default Site URL", async () => {
+    signUpMock.mockResolvedValue({ data: { session: null, user: { id: "u1" } }, error: null });
+
+    await signUp({}, signUpFormData());
+
+    expect(signUpMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({
+          emailRedirectTo: expect.stringMatching(/\/auth\/callback$/),
+        }),
+      })
+    );
+  });
+
   it("returns a safe error for an already-registered email without exposing the raw Supabase message", async () => {
     signUpMock.mockResolvedValue({ data: { session: null }, error: { message: "User already registered" } });
 
@@ -105,6 +119,17 @@ describe("signUp", () => {
 
     expect(result.error).toBe("Unable to create your account. Please try again.");
     expect(result.error).not.toContain("internal Supabase detail");
+  });
+
+  it("returns a dedicated, honest message when Supabase's own email-send rate limit is hit", async () => {
+    signUpMock.mockResolvedValue({
+      data: { session: null },
+      error: { code: "over_email_send_rate_limit", status: 429, message: "email rate limit exceeded" },
+    });
+
+    const result = await signUp({}, signUpFormData());
+
+    expect(result.error).toBe("We're sending a lot of confirmation emails right now. Please wait a few minutes and try again.");
   });
 });
 
