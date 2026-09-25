@@ -4,6 +4,7 @@ import { NextRequest } from "next/server";
 const exchangeCodeForSessionMock = vi.fn();
 const verifyOtpMock = vi.fn();
 const getUserMock = vi.fn();
+const signOutMock = vi.fn();
 const fromMock = vi.fn();
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -12,6 +13,7 @@ vi.mock("@/lib/supabase/server", () => ({
       exchangeCodeForSession: exchangeCodeForSessionMock,
       verifyOtp: verifyOtpMock,
       getUser: getUserMock,
+      signOut: signOutMock,
     },
     from: fromMock,
   })),
@@ -33,6 +35,7 @@ beforeEach(() => {
   exchangeCodeForSessionMock.mockReset();
   verifyOtpMock.mockReset();
   getUserMock.mockReset();
+  signOutMock.mockReset();
   fromMock.mockReset();
 });
 
@@ -87,14 +90,40 @@ describe("GET /auth/callback", () => {
     expect(location).not.toContain("/admin");
   });
 
-  it("falls back to the citizen home if no user/profile is found after a successful exchange", async () => {
+  it("never guesses a role: no user/profile after a successful exchange ends at a safe error, not a dashboard", async () => {
     exchangeCodeForSessionMock.mockResolvedValue({ error: null });
     getUserMock.mockResolvedValue({ data: { user: null } });
     const request = new NextRequest("http://localhost:3000/auth/callback?code=good-code");
 
     const response = await GET(request);
 
-    expect(response.headers.get("location")).toBe("http://localhost:3000/dashboard");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/sign-in?error=account_not_configured");
+    expect(signOutMock).toHaveBeenCalled();
+  });
+
+  it("treats a profile with an unrecognized role the same way", async () => {
+    exchangeCodeForSessionMock.mockResolvedValue({ error: null });
+    getUserMock.mockResolvedValue({ data: { user: { id: "u-1" } } });
+    fromMock.mockReturnValue(profilesRoleQuery("superuser"));
+    const request = new NextRequest("http://localhost:3000/auth/callback?code=good-code");
+
+    const response = await GET(request);
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/sign-in?error=account_not_configured");
+  });
+
+  it.each([
+    ["department_incharge", "/department"],
+    ["admin", "/admin"],
+  ])("redirects a confirmed %s to %s", async (role, home) => {
+    exchangeCodeForSessionMock.mockResolvedValue({ error: null });
+    getUserMock.mockResolvedValue({ data: { user: { id: `${role}-1` } } });
+    fromMock.mockReturnValue(profilesRoleQuery(role));
+    const request = new NextRequest("http://localhost:3000/auth/callback?code=good-code");
+
+    const response = await GET(request);
+
+    expect(response.headers.get("location")).toBe(`http://localhost:3000${home}`);
   });
 
   describe("token_hash flow (Supabase's default 'Confirm signup' email template)", () => {
@@ -119,6 +148,16 @@ describe("GET /auth/callback", () => {
 
       expect(response.headers.get("location")).toBe("http://localhost:3000/sign-in?error=confirmation_failed");
       expect(response.headers.get("location")).not.toContain("internal detail");
+    });
+
+    it("sends a verified admin invitation to the set-password page, not straight to a dashboard", async () => {
+      verifyOtpMock.mockResolvedValue({ error: null });
+      const request = new NextRequest("http://localhost:3000/auth/callback?token_hash=invite-hash&type=invite");
+
+      const response = await GET(request);
+
+      expect(verifyOtpMock).toHaveBeenCalledWith({ token_hash: "invite-hash", type: "invite" });
+      expect(response.headers.get("location")).toBe("http://localhost:3000/auth/accept-invite");
     });
 
     it("treats a token_hash with no type as an incomplete link, never calling verifyOtp", async () => {

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import { MapPinOff } from "lucide-react";
 import { DepartmentPerformanceCard } from "@/components/cards/DepartmentPerformanceCard";
 import { DepartmentAnalyticsTable } from "@/components/cards/DepartmentAnalyticsTable";
@@ -17,10 +16,11 @@ import { WorkloadDistribution } from "@/components/cards/WorkloadDistribution";
 import { DepartmentTrendCard } from "@/components/cards/DepartmentTrendCard";
 import { FollowUpCenter } from "@/components/cards/FollowUpCenter";
 import { IncidentsSection } from "@/components/cards/IncidentsSection";
+import { RecentReportsCard } from "@/components/cards/RecentReportsCard";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { statusLabels } from "@/components/ui/StatusBadge";
 import { categoryLabels } from "@/lib/categories";
-import { getSessionProfile } from "@/lib/supabase/server";
+import { requireRole } from "@/lib/supabase/server";
 import {
   getGovernmentIssues,
   getAreaOverview,
@@ -53,11 +53,7 @@ const INSIGHT_TONE: Record<string, AIInsight["tone"]> = {
 };
 
 export default async function GovernmentDashboardPage() {
-  const session = await getSessionProfile();
-  if (!session) redirect("/sign-in");
-  if (session.profile.role !== "government" && session.profile.role !== "admin") {
-    redirect("/dashboard");
-  }
+  const session = await requireRole(["government", "admin"]);
 
   const hasJurisdiction =
     session.profile.role === "admin" ||
@@ -189,6 +185,11 @@ export default async function GovernmentDashboardPage() {
           </div>
         ) : (
           <>
+            {/* A2. New & Recent Reports (Phase G2) */}
+            <section className="mt-10">
+              <RecentReportsCard issues={issues} />
+            </section>
+
             {/* B. Attention Required */}
             <section className="mt-10">
               <h2 className="text-lg font-semibold text-foreground">Needs Attention</h2>

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import { ArrowLeft, Building2, CalendarDays, ListChecks, Sparkles, Users } from "lucide-react";
 import { PriorityBadge } from "@/components/ui/PriorityBadge";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -9,7 +9,7 @@ import { IncidentMap } from "@/components/incident/IncidentMap";
 import { IncidentActionsPanel } from "@/components/incident/IncidentActionsPanel";
 import { categoryLabels } from "@/lib/categories";
 import { agingLabel, agingClass } from "@/lib/aging";
-import { getSessionProfile } from "@/lib/supabase/server";
+import { requireRole } from "@/lib/supabase/server";
 import { getIncidentDetail } from "@/lib/data/incidents";
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
@@ -32,9 +32,7 @@ function daysBetween(iso: string) {
 
 export default async function IncidentDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const session = await getSessionProfile();
-  if (!session) redirect("/sign-in");
-  if (session.profile.role === "citizen") redirect("/dashboard");
+  const session = await requireRole(["government", "department_incharge", "admin"]);
 
   const detail = await getIncidentDetail(id);
   if (!detail) notFound();

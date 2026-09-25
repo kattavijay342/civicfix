@@ -18,6 +18,8 @@ import { beginIdempotentAction } from "@/lib/idempotency";
 import { sanitizeCoordinates } from "@/lib/location/validation";
 import { createNotification } from "@/lib/notifications/create";
 import { findGovernmentUsersForJurisdiction } from "@/lib/notifications/targeting";
+import { notifyGovernmentOfNewReport } from "@/lib/notifications/new-report";
+import { resolveReportJurisdiction } from "@/lib/report-jurisdiction";
 import type { CivicLocation, ProblemCategory } from "@/lib/types";
 
 export type CreateReportState =
@@ -208,6 +210,18 @@ async function performCreateReport(
     return { status: "error", error: "Please select a location on the map." };
   }
 
+  // Phase G2: the jurisdiction fields are what RLS (report_in_my_jurisdiction)
+  // and government notification targeting match on, so they're resolved
+  // against the configured hierarchy here instead of stored as the client
+  // sent them. Everything downstream (duplicate detection, AI, routing,
+  // incident linking) then sees the same canonical values that get stored.
+  const resolvedJurisdiction = resolveReportJurisdiction(location);
+  if (!resolvedJurisdiction.ok) {
+    return { status: "error", error: resolvedJurisdiction.error };
+  }
+  const jurisdiction = resolvedJurisdiction.jurisdiction;
+  location = { ...location, ...jurisdiction };
+
   // Keep the profile's own name/mobile in sync instead of duplicating it
   // per-report (Step "Reporter details").
   const { data: profile } = await supabase
@@ -288,10 +302,10 @@ async function performCreateReport(
   const { error: locationError } = await admin.from("report_locations").insert({
     report_id: reportId,
     display_name: location.displayName,
-    state: location.state ?? null,
-    district: location.district ?? null,
-    constituency: location.constituency ?? null,
-    area: location.area ?? null,
+    state: jurisdiction.state,
+    district: jurisdiction.district,
+    constituency: jurisdiction.constituency,
+    area: jurisdiction.area,
     village: location.village ?? null,
     ward: location.ward ?? null,
     municipality: location.municipality ?? null,
@@ -413,6 +427,22 @@ async function performCreateReport(
   } catch (err) {
     aiFailed = true;
     console.error("AI analysis failed for report", reportId, err);
+  }
+
+  // Phase G2 — REPORT_CREATED for the government users whose jurisdiction
+  // covers this report. Sent after AI analysis so the payload carries the
+  // real priority when there is one (null, never guessed, when AI failed).
+  try {
+    await notifyGovernmentOfNewReport(admin, {
+      reportId,
+      title,
+      category: categoryToDb[category],
+      categoryLabel: categoryLabels[category],
+      jurisdiction,
+      priority: completedAnalysis?.priority ?? null,
+    });
+  } catch (err) {
+    console.error("Government new-report notification failed (non-fatal)", reportId, err);
   }
 
   // Civic Incident Intelligence — best-effort, non-fatal, exactly like

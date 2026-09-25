@@ -1,6 +1,9 @@
 import "server-only";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { resolveRoleHome } from "@/lib/role-routes";
+import type { UserRole } from "@/lib/types";
 
 /**
  * Per-request Supabase client for Server Components / Server Actions /
@@ -56,4 +59,24 @@ export async function getSessionProfile() {
   if (!profile) return null;
 
   return { user, profile };
+}
+
+/**
+ * Server-side route guard for role-restricted pages. The role is always
+ * the authenticated user's stored profile role (via getSessionProfile) —
+ * never a URL/query value or anything else the client sends.
+ *
+ *   - not signed in (or no profile row)  -> /sign-in
+ *   - signed in with a disallowed role   -> that user's own role home
+ *   - signed in with no recognized role  -> /sign-in with a safe error
+ */
+export async function requireRole(allowed: readonly UserRole[]) {
+  const session = await getSessionProfile();
+  if (!session) redirect("/sign-in");
+
+  const role = session.profile.role;
+  if (!allowed.includes(role)) {
+    redirect(resolveRoleHome(role) ?? "/sign-in?error=account_not_configured");
+  }
+  return session;
 }

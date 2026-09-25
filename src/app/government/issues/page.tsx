@@ -1,11 +1,10 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { IssueCard } from "@/components/cards/IssueCard";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { IssueListFilterBar, IssueListPagination } from "@/components/cards/IssueListControls";
-import { getSessionProfile } from "@/lib/supabase/server";
+import { requireRole } from "@/lib/supabase/server";
 import { getGovernmentIssuesPage } from "@/lib/data/government";
 import { getAllDepartments } from "@/lib/data/admin";
 import type { IssueListFilters, IssueStatus, Priority, ProblemCategory } from "@/lib/types";
@@ -25,11 +24,7 @@ export default async function GovernmentAllIssuesPage({
 }: {
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
-  const session = await getSessionProfile();
-  if (!session) redirect("/sign-in");
-  if (session.profile.role !== "government" && session.profile.role !== "admin") {
-    redirect("/dashboard");
-  }
+  await requireRole(["government", "admin"]);
 
   const params = await searchParams;
   const page = Number(params.page ?? "1") || 1;

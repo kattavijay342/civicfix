@@ -23,7 +23,16 @@ interface Row {
   gov_area: string | null;
 }
 
-export function UserRoleRow({ profile, departments }: { profile: Row; departments: { id: string; name: string }[] }) {
+export function UserRoleRow({
+  profile,
+  departments,
+  isSelf = false,
+}: {
+  profile: Row;
+  departments: { id: string; name: string }[];
+  /** The signed-in admin's own row — read-only (the server refuses self role changes too). */
+  isSelf?: boolean;
+}) {
   const action = updateUserRole.bind(null, profile.id);
   const [state, formAction, pending] = useActionState(action, initialState);
   const [role, setRole] = useState<UserRole>(profile.role);
@@ -36,13 +45,17 @@ export function UserRoleRow({ profile, departments }: { profile: Row; department
   return (
     <form action={formAction} className="grid grid-cols-1 gap-2 border-b border-border py-4 last:border-b-0 lg:grid-cols-[1.5fr_1fr_2fr_auto] lg:items-start lg:gap-3">
       <div>
-        <p className="text-sm font-semibold text-foreground">{profile.full_name || "—"}</p>
+        <p className="text-sm font-semibold text-foreground">
+          {profile.full_name || "—"}
+          {isSelf && <span className="ml-1.5 text-xs font-normal text-foreground-muted">(you)</span>}
+        </p>
         <p className="text-xs text-foreground-muted">{profile.email}</p>
       </div>
 
       <select
         name="role"
         value={role}
+        disabled={isSelf}
         onChange={(e) => setRole(e.target.value as UserRole)}
         className={fieldClass}
       >
@@ -76,7 +89,7 @@ export function UserRoleRow({ profile, departments }: { profile: Row; department
             }}
             className={fieldClass}
           >
-            <option value="">Any state</option>
+            <option value="">Select state</option>
             {stateNames.map((s) => (
               <option key={s} value={s}>
                 {s}
@@ -130,7 +143,7 @@ export function UserRoleRow({ profile, departments }: { profile: Row; department
       <div className="flex items-center gap-2">
         <button
           type="submit"
-          disabled={pending}
+          disabled={pending || isSelf}
           className="inline-flex items-center gap-1.5 rounded-full bg-civic-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-civic-700 disabled:opacity-60"
         >
           {pending && <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />}

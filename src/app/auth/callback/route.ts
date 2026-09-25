@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
-import { roleHomePath } from "@/lib/role-routes";
+import { resolveRoleHome } from "@/lib/role-routes";
 
 /** Only these values are ever passed to `verifyOtp` — Supabase's own email
  * templates set `type`, but it still arrives as an untrusted query param,
@@ -38,7 +38,7 @@ function isEmailOtpType(value: string | null): value is EmailOtpType {
  *
  * Every redirect target is a fixed, known CivicFix path — `/sign-in` (with
  * an internally-defined `error` code, never raw user input) or
- * `roleHomePath(role)`, where `role` is always re-derived from the
+ * the role home from `resolveRoleHome(role)`, where `role` is always re-derived from the
  * authenticated user's own profile row, never trusted from the URL/query.
  *
  * REQUIRES matching config in the Supabase Dashboard, which lives outside
@@ -70,15 +70,32 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(new URL("/sign-in?error=confirmation_failed", request.url));
   }
 
+  // An admin invitation (only reaches here when the Supabase "Invite user"
+  // template links straight at this route with a token_hash) still needs
+  // the invited user to choose their own password before anything else.
+  if (!code && typeParam === "invite") {
+    return NextResponse.redirect(new URL("/auth/accept-invite", request.url));
+  }
+
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  let role = "citizen";
-  if (user) {
-    const { data: profile } = await supabase.from("profiles").select("role").eq("id", user.id).single();
-    if (profile?.role) role = profile.role;
+  const { data: profile } = user
+    ? await supabase.from("profiles").select("role").eq("id", user.id).single()
+    : { data: null };
+  const home = resolveRoleHome(profile?.role);
+
+  if (!home) {
+    // Never guess a role (and never default to citizen) for an account
+    // with no valid profile — end the session and show a safe message.
+    console.error("[auth/callback] authenticated user has no valid application role", {
+      userId: user?.id ?? null,
+      hasProfile: !!profile,
+    });
+    await supabase.auth.signOut();
+    return NextResponse.redirect(new URL("/sign-in?error=account_not_configured", request.url));
   }
 
-  return NextResponse.redirect(new URL(roleHomePath(role), request.url));
+  return NextResponse.redirect(new URL(home, request.url));
 }

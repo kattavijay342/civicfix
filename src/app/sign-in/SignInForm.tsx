@@ -1,9 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState, useState } from "react";
 import { AlertCircle, Loader2, MailCheck } from "lucide-react";
-import { signIn, signUp, type AuthFormState } from "@/lib/actions/auth";
+import { signIn, signInAuthorized, signUp, type AuthFormState } from "@/lib/actions/auth";
 import { cn } from "@/lib/utils";
+import { ACTIVATE_INVITE_PATH, AUTHORIZED_SIGN_IN_PATH, CITIZEN_SIGN_IN_PATH, type SignInMode } from "@/lib/sign-in-mode";
 
 const initialState: AuthFormState = {};
 
@@ -14,24 +16,67 @@ interface SignInFormProps {
   /** A safe, pre-mapped message from a redirect out of
    * src/app/auth/callback/route.ts — never raw query input. */
   callbackError?: string;
+  /** "authorized" = /sign-in?mode=authorized (see src/lib/sign-in-mode.ts).
+   * Never grants a role: the landing page always comes from the stored
+   * profile role, and authorized mode only narrows who may sign in. */
+  mode?: SignInMode;
 }
 
-export function SignInForm({ callbackError }: SignInFormProps) {
+const linkClasses =
+  "rounded font-semibold text-civic-700 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-civic-600";
+
+export function SignInForm({ callbackError, mode = "citizen" }: SignInFormProps) {
   const [tab, setTab] = useState<"sign-in" | "sign-up">("sign-in");
   const [signInState, signInAction, signInPending] = useActionState(signIn, initialState);
   const [signUpState, signUpAction, signUpPending] = useActionState(signUp, initialState);
+  const [authorizedState, authorizedAction, authorizedPending] = useActionState(signInAuthorized, initialState);
+
+  const errorBanner = callbackError && (
+    <p
+      role="alert"
+      className="mb-6 flex items-center gap-1.5 rounded-lg bg-priority-critical-bg px-3 py-2 text-sm text-priority-critical"
+    >
+      <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+      {callbackError}
+    </p>
+  );
+
+  // Government & Department mode: email + password only, no sign-up, no
+  // role picker. Submits signInAuthorized, which only completes for a
+  // stored government / department_incharge / admin role and turns a
+  // citizen account away. Citizen mode below is unchanged and uses signIn.
+  if (mode === "authorized") {
+    return (
+      <div className="rounded-2xl border border-border bg-white p-6 shadow-sm sm:p-8">
+        {errorBanner}
+        <form action={authorizedAction} aria-label="Authorized government and department sign in" className="flex flex-col gap-4">
+          <Field label="Email" name="email" type="email" required autoComplete="email" errorId={authorizedState.error ? "authorized-form-error" : undefined} />
+          <Field label="Password" name="password" type="password" required autoComplete="current-password" errorId={authorizedState.error ? "authorized-form-error" : undefined} />
+          <FormError state={authorizedState} id="authorized-form-error" />
+          <SubmitButton pending={authorizedPending} label="Sign In" />
+          <p className="text-center text-sm text-foreground-muted">
+            Don&apos;t have an activated account?{" "}
+            <Link href={ACTIVATE_INVITE_PATH} className={linkClasses}>
+              Activate your invited account →
+            </Link>
+          </p>
+          <p className="text-center text-xs text-foreground-muted">
+            This sign-in is only for authorized government &amp; department users. Citizens, please use Citizen
+            Sign In.
+          </p>
+        </form>
+        <p className="mt-6 border-t border-border pt-5 text-center text-sm">
+          <Link href={CITIZEN_SIGN_IN_PATH} className={linkClasses}>
+            ← Back to Citizen Sign In
+          </Link>
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-2xl border border-border bg-white p-6 shadow-sm sm:p-8">
-      {callbackError && (
-        <p
-          role="alert"
-          className="mb-6 flex items-center gap-1.5 rounded-lg bg-priority-critical-bg px-3 py-2 text-sm text-priority-critical"
-        >
-          <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
-          {callbackError}
-        </p>
-      )}
+      {errorBanner}
 
       <div role="tablist" aria-label="Sign in or sign up" className="mb-6 flex rounded-full bg-surface-muted p-1">
         {(["sign-in", "sign-up"] as const).map((t) => (
@@ -105,6 +150,23 @@ export function SignInForm({ callbackError }: SignInFormProps) {
           <SubmitButton pending={signUpPending} label="Create account" />
         </form>
       )}
+
+      {/* Opens the Government & Department mode of this same page
+          (/sign-in?mode=authorized). */}
+      <div className="mt-6 border-t border-border pt-5 text-center text-xs text-foreground-muted">
+        <p className="text-sm font-semibold text-foreground">Authorized Government &amp; Department Users</p>
+        <p className="mt-2">
+          Already have an account?{" "}
+          <Link href={AUTHORIZED_SIGN_IN_PATH} className={linkClasses}>
+            Sign in here →
+          </Link>
+        </p>
+        <p className="mt-2">
+          Use the account invited by your CivicFix administrator.
+          <br />
+          Your dashboard opens automatically.
+        </p>
+      </div>
     </div>
   );
 }

@@ -1,11 +1,10 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
 import { AlertOctagon } from "lucide-react";
 import { IncidentCard } from "@/components/cards/IncidentCard";
 import { IncidentListFilterBar } from "@/components/cards/IncidentListControls";
 import { IssueListPagination } from "@/components/cards/IssueListControls";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { getSessionProfile } from "@/lib/supabase/server";
+import { requireRole } from "@/lib/supabase/server";
 import { getIncidentList, getIncidentDepartments } from "@/lib/data/incidents";
 import type { IncidentListFilters, IssueStatus, Priority, ProblemCategory } from "@/lib/types";
 
@@ -20,9 +19,7 @@ export default async function IncidentsListPage({
 }: {
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
-  const session = await getSessionProfile();
-  if (!session) redirect("/sign-in");
-  if (session.profile.role === "citizen") redirect("/dashboard");
+  await requireRole(["government", "department_incharge", "admin"]);
 
   const params = await searchParams;
   const page = Math.max(1, Number(params.page ?? "1") || 1);

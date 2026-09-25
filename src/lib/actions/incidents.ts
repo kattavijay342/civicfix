@@ -19,7 +19,9 @@ export type IncidentActionState = { error?: string; success?: boolean };
 async function assertCanActOnIncident(incidentId: string): Promise<{ error?: string }> {
   const session = await getSessionProfile();
   if (!session) return { error: "You must be signed in." };
-  if (session.profile.role === "citizen") return { error: "Not authorized to manage incidents." };
+  if (!["government", "department_incharge", "admin"].includes(session.profile.role)) {
+    return { error: "Not authorized to manage incidents." };
+  }
 
   const supabase = await createClient();
   const { data } = await supabase.from("civic_incidents").select("id").eq("id", incidentId).maybeSingle();

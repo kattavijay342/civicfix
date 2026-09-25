@@ -9,13 +9,14 @@ import { signOut } from "@/lib/actions/auth";
 import { roleHomePath } from "@/lib/role-routes";
 import type { Profile } from "@/lib/types";
 
-const navLinks = [
+const publicLinks = [
   { label: "Home", href: "/" },
   { label: "How It Works", href: "/#how-it-works" },
   { label: "Issues", href: "/#explore" },
   { label: "About", href: "/#about" },
-  { label: "Citizen", href: "/dashboard" },
 ];
+
+const citizenLink = { label: "Citizen", href: "/dashboard" };
 
 const roleLabels: Record<string, string> = {
   government: "Authorized Government User",
@@ -26,14 +27,14 @@ const roleLabels: Record<string, string> = {
 export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; unreadCount?: number }) {
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  // "Citizen" is always in navLinks and already points at /dashboard, so a
-  // signed-in citizen doesn't need a second, redundant link to the same
-  // place — only government/department/admin get an extra role-home link.
-  const homeLink =
-    profile && profile.role !== "citizen"
-      ? { label: roleLabels[profile.role] ?? "Dashboard", href: roleHomePath(profile.role) }
-      : null;
-  const links = homeLink ? [...navLinks, homeLink] : navLinks;
+  // Visitors and citizens see the citizen dashboard link; government /
+  // department / admin users see only their own role's dashboard instead.
+  // Display only — every one of those routes enforces the role server-side
+  // (requireRole in src/lib/supabase/server.ts).
+  const roleLink = profile && roleLabels[profile.role]
+    ? { label: roleLabels[profile.role], href: roleHomePath(profile.role) }
+    : citizenLink;
+  const links = [...publicLinks, roleLink];
   const notificationsHref = profile ? "/notifications" : "/sign-in";
 
   useEffect(() => {

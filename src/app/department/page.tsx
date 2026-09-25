@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
 import { ClipboardList, ListChecks, Loader2, CheckCircle2 } from "lucide-react";
 import { IssueCard } from "@/components/cards/IssueCard";
 import { DashboardStat } from "@/components/cards/DashboardStat";
@@ -8,7 +7,7 @@ import { ResolutionQualityCard } from "@/components/cards/ResolutionQualityCard"
 import { IncidentsSection } from "@/components/cards/IncidentsSection";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { IssueListFilterBar, IssueListPagination } from "@/components/cards/IssueListControls";
-import { getSessionProfile } from "@/lib/supabase/server";
+import { requireRole } from "@/lib/supabase/server";
 import { getAssignedIssuesPage, getAssignedIssueStats } from "@/lib/data/department";
 import { getAgingBuckets, getResolutionQuality } from "@/lib/data/government";
 import { getIncidentList } from "@/lib/data/incidents";
@@ -23,11 +22,7 @@ export default async function DepartmentDashboardPage({
 }: {
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
-  const session = await getSessionProfile();
-  if (!session) redirect("/sign-in");
-  if (session.profile.role !== "department_incharge" && session.profile.role !== "admin") {
-    redirect("/dashboard");
-  }
+  const session = await requireRole(["department_incharge", "admin"]);
 
   const params = await searchParams;
   const page = Number(params.page ?? "1") || 1;
