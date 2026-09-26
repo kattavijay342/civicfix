@@ -21,6 +21,8 @@ import { getReportDetail } from "@/lib/data/report-detail";
 import { getReportReminders } from "@/lib/data/reminders";
 import { getCitizenIncidentNote } from "@/lib/data/incidents";
 import { getSessionProfile } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { checkInchargeAccess } from "@/lib/data/incharge-access";
 import { buildCitizenSummary, STATUS_EXPLANATIONS } from "@/lib/citizen-summary";
 import { RetryAnalysisButton } from "@/app/report/analysis/RetryAnalysisButton";
 import { FollowUpForm } from "@/components/report/FollowUpForm";
@@ -28,6 +30,7 @@ import { ReminderForm } from "@/components/report/ReminderForm";
 import { ReportLocationMap } from "@/components/report/ReportLocationMap";
 import { ReminderRow } from "@/components/report/ReminderRow";
 import { DepartmentActionsPanel } from "@/components/report/DepartmentActionsPanel";
+import { routingStateFor, ROUTING_STATE_LABELS } from "@/lib/routing";
 import { ResolutionFeedbackForm } from "@/components/report/ResolutionFeedbackForm";
 import { cn } from "@/lib/utils";
 
@@ -96,7 +99,27 @@ async function RealReportDetail({ id }: { id: string }) {
 
   if (!report) return <NotFound id={id} />;
 
-  const reminders = session ? await getReportReminders(report.id, session.user.id) : [];
+  // G4 — RLS (report_assigned_to_me) only checks the assignment's
+  // incharge_id. For an in-charge viewing someone else's report, also
+  // require the assignment to still be EFFECTIVE (same department, active,
+  // jurisdiction still covers it) so a moved/deactivated in-charge can't
+  // keep reading an old assignment by direct URL.
+  const isInchargeViewer = session?.profile.role === "department_incharge" && session.user.id !== report.reporterId;
+  const inchargeAccess = isInchargeViewer
+    ? await checkInchargeAccess(createAdminClient(), session.user.id, report.id)
+    : null;
+  if (inchargeAccess && !inchargeAccess.ok) return <NotFound id={id} />;
+  const canActAsDepartment = session?.profile.role === "admin" || inchargeAccess?.ok === true;
+
+  // G5 — whether the stored in-charge still EFFECTIVELY owns this report
+  // (G4 rule, evaluated for the in-charge). A deactivated/moved/re-scoped
+  // in-charge is shown as unavailable, never as the valid owner.
+  const inchargeEffective = report.assignment?.inchargeId
+    ? (await checkInchargeAccess(createAdminClient(), report.assignment.inchargeId, report.id)).ok
+    : false;
+  const reminders = session
+    ? await getReportReminders(report.id, session.user.id, inchargeEffective ? report.assignment!.inchargeId : null)
+    : [];
   const isOwner = session?.user.id === report.reporterId;
   const incidentNote = isOwner ? await getCitizenIncidentNote(report.id) : null;
   const isGovOrAdmin = session?.profile.role === "government" || session?.profile.role === "admin";
@@ -115,6 +138,16 @@ async function RealReportDetail({ id }: { id: string }) {
   const showFeedbackForm = isOwner && report.status === "RESOLVED" && !feedbackIsForCurrentResolution;
 
   const departmentAcknowledged = report.statusHistory.some((h) => h.newStatus === "ACKNOWLEDGED");
+  const routingState = routingStateFor(report.assignment, report.status);
+  // The in-charge's name is internal staffing data: government, admin and
+  // department users see it; the reporting citizen sees only the state.
+  const canSeeIncharge = isGovOrAdmin || session?.profile.role === "department_incharge";
+  // The plain-language summary names the in-charge too — strip it for
+  // viewers (the reporting citizen) who may not see that identity.
+  const summaryReport =
+    (canSeeIncharge && inchargeEffective) || !report.assignment
+      ? report
+      : { ...report, assignment: { ...report.assignment, inchargeName: null } };
 
   return (
     <div className="bg-surface-muted">
@@ -190,7 +223,7 @@ async function RealReportDetail({ id }: { id: string }) {
             <SparklesIcon className="h-3.5 w-3.5" aria-hidden="true" />
             Understand your report
           </h2>
-          <p className="mt-2 text-sm leading-relaxed text-foreground">{buildCitizenSummary(report)}</p>
+          <p className="mt-2 text-sm leading-relaxed text-foreground">{buildCitizenSummary(summaryReport)}</p>
           <p className="mt-2 border-t border-civic-100 pt-2 text-xs text-foreground-muted">
             <span className="font-medium text-foreground">Next:</span> {STATUS_EXPLANATIONS[report.status].nextStep.en}
           </p>
@@ -227,6 +260,10 @@ async function RealReportDetail({ id }: { id: string }) {
                     Reported
                   </dt>
                   <dd className="mt-1 font-semibold text-foreground">{formatDate(report.createdAt)}</dd>
+                </div>
+                <div>
+                  <dt className="text-foreground-muted">Last updated</dt>
+                  <dd className="mt-1 font-semibold text-foreground">{formatDate(report.updatedAt)}</dd>
                 </div>
                 <div>
                   <dt className="text-foreground-muted">Category</dt>
@@ -292,8 +329,8 @@ async function RealReportDetail({ id }: { id: string }) {
                       {report.aiAnalysis.recommendedDepartment}
                     </p>
                     <p className="mt-1 text-[11px] text-foreground-muted">
-                      A recommendation only — actual routing uses CivicFix&apos;s configured department mapping
-                      (see Routing).
+                      A recommendation only — CivicFix validates it against its configured departments before
+                      routing (see Routing).
                     </p>
                   </div>
                   <div className="mt-4 flex flex-col gap-4">
@@ -317,7 +354,7 @@ async function RealReportDetail({ id }: { id: string }) {
             </div>
 
             {(report.followUps.length > 0 || isGovOrAdmin) && (
-              <div className="rounded-2xl border border-border bg-white p-6">
+              <div id="follow-ups" className="scroll-mt-20 rounded-2xl border border-border bg-white p-6">
                 <h2 className="text-sm font-semibold text-foreground">Follow-ups</h2>
                 {report.followUps.length > 0 ? (
                   <ol className="mt-4 flex flex-col gap-4">
@@ -343,11 +380,11 @@ async function RealReportDetail({ id }: { id: string }) {
             )}
 
             {(reminders.length > 0 || isGovOrAdmin) && (
-              <div className="rounded-2xl border border-border bg-white p-6">
-                <h2 className="text-sm font-semibold text-foreground">Reminders</h2>
+              <div id="reminders" className="scroll-mt-20 rounded-2xl border border-border bg-white p-6">
+                <h2 className="text-sm font-semibold text-foreground">Department follow-ups</h2>
                 <p className="mt-1 text-xs text-foreground-muted">
-                  Scheduled instructions for the department in-charge, delivered automatically as an
-                  in-app notification when they come due.
+                  Government follow-ups and reminders for the report&apos;s current department in-charge,
+                  delivered as an in-app notification — immediately, or when a scheduled one comes due.
                 </p>
                 {reminders.length > 0 ? (
                   <ul className="mt-4 flex flex-col gap-4">
@@ -356,15 +393,16 @@ async function RealReportDetail({ id }: { id: string }) {
                     ))}
                   </ul>
                 ) : (
-                  <p className="mt-3 text-sm text-foreground-muted">No reminders scheduled yet.</p>
+                  <p className="mt-3 text-sm text-foreground-muted">No follow-ups sent yet.</p>
                 )}
                 {isGovOrAdmin &&
-                  (report.assignment?.inchargeId ? (
+                  (inchargeEffective ? (
                     <ReminderForm reportId={report.id} />
                   ) : (
                     <p className="mt-4 border-t border-border pt-4 text-xs text-foreground-muted">
-                      A department in-charge must be assigned to this report before a reminder can be
-                      scheduled.
+                      {report.assignment?.inchargeId
+                        ? "Department in-charge unavailable — a reminder can be scheduled once an active in-charge is assigned."
+                        : "A department in-charge must be assigned to this report before a reminder can be scheduled."}
                     </p>
                   ))}
               </div>
@@ -430,11 +468,27 @@ async function RealReportDetail({ id }: { id: string }) {
                   </dd>
                 </div>
                 <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
-                  <dt className="text-foreground-muted">In-charge</dt>
-                  <dd className="text-right font-semibold text-foreground">
-                    {report.assignment?.inchargeName ?? "Not yet assigned"}
+                  <dt className="text-foreground-muted">Assignment</dt>
+                  <dd className="text-right font-semibold text-foreground" data-testid="routing-state">
+                    {ROUTING_STATE_LABELS[routingState]}
                   </dd>
                 </div>
+                {report.assignment && (
+                  <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+                    <dt className="text-foreground-muted">Routed on</dt>
+                    <dd className="text-right font-semibold text-foreground">
+                      {formatDate(report.assignment.assignedAt)}
+                    </dd>
+                  </div>
+                )}
+                {canSeeIncharge && routingState === "assigned" && (
+                  <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+                    <dt className="text-foreground-muted">In-charge</dt>
+                    <dd className="text-right font-semibold text-foreground" data-testid="incharge-name">
+                      {inchargeEffective ? report.assignment?.inchargeName : "Department in-charge unavailable"}
+                    </dd>
+                  </div>
+                )}
               </dl>
             </div>
 
@@ -450,9 +504,7 @@ async function RealReportDetail({ id }: { id: string }) {
               </div>
             </div>
 
-            {(session?.profile.role === "admin" ||
-              (session?.profile.role === "department_incharge" &&
-                session.profile.id === report.assignment?.inchargeId)) && (
+            {canActAsDepartment && (
               <DepartmentActionsPanel
                 reportId={report.id}
                 status={report.status}

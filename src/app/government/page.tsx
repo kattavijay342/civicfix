@@ -8,7 +8,7 @@ import { FollowUpCard } from "@/components/cards/FollowUpCard";
 import { AIInsightCard } from "@/components/cards/AIInsightCard";
 import { DuplicateIssueCard } from "@/components/cards/DuplicateIssueCard";
 import { MapPreview } from "@/components/cards/MapPreview";
-import { AttentionRequiredSection } from "@/components/cards/AttentionRequiredSection";
+import { ActionRequiredCenter } from "@/components/cards/ActionRequiredCenter";
 import { AgingBucketsChart } from "@/components/cards/AgingBucketsChart";
 import { CategoryTrendsChart } from "@/components/cards/CategoryTrendsChart";
 import { ResolutionQualityCard } from "@/components/cards/ResolutionQualityCard";
@@ -32,9 +32,9 @@ import {
   getDepartmentWorkload,
   getDepartmentTrends,
   getCategoryTrends,
-  getNeedsAttention,
-  getActionCenterCounts,
 } from "@/lib/data/government";
+import { getActionRequired } from "@/lib/data/action-required";
+import { isActionQueue } from "@/lib/action-required";
 import { getFollowUpCenter } from "@/lib/data/reminders";
 import { getIncidentList } from "@/lib/data/incidents";
 import { buildGovernmentMetricsSnapshot, generateGovernmentAIInsights } from "@/lib/government-insights-ai";
@@ -52,8 +52,15 @@ const INSIGHT_TONE: Record<string, AIInsight["tone"]> = {
   geographic: "down",
 };
 
-export default async function GovernmentDashboardPage() {
+export default async function GovernmentDashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | undefined>>;
+}) {
   const session = await requireRole(["government", "admin"]);
+  // Display filter only — narrows rows the server already authorized.
+  const { queue } = await searchParams;
+  const activeQueue = isActionQueue(queue) ? queue : null;
 
   const hasJurisdiction =
     session.profile.role === "admin" ||
@@ -87,8 +94,7 @@ export default async function GovernmentDashboardPage() {
     departmentWorkload,
     departmentTrends,
     categoryTrends,
-    needsAttention,
-    actionCounts,
+    actionRequired,
     followUpCenter,
     incidents,
   ] = await Promise.all([
@@ -102,8 +108,7 @@ export default async function GovernmentDashboardPage() {
     getDepartmentWorkload(),
     getDepartmentTrends(),
     getCategoryTrends(30),
-    getNeedsAttention(),
-    getActionCenterCounts(),
+    getActionRequired(),
     getFollowUpCenter(),
     getIncidentList(),
   ]);
@@ -176,6 +181,18 @@ export default async function GovernmentDashboardPage() {
           </p>
         </div>
 
+        {/* G5. Action Required command center */}
+        <section id="action-required" className="mt-10 scroll-mt-20">
+          <h2 className="text-lg font-semibold text-foreground">Action Required</h2>
+          <p className="mt-1 text-sm text-foreground-muted">
+            What needs your attention right now — monitoring and follow-up only. Department in-charges
+            own acknowledge, start work and resolve.
+          </p>
+          <div className="mt-4">
+            <ActionRequiredCenter data={actionRequired} activeQueue={activeQueue} />
+          </div>
+        </section>
+
         {issues.length === 0 ? (
           <div className="mt-10">
             <EmptyState
@@ -188,15 +205,6 @@ export default async function GovernmentDashboardPage() {
             {/* A2. New & Recent Reports (Phase G2) */}
             <section className="mt-10">
               <RecentReportsCard issues={issues} />
-            </section>
-
-            {/* B. Attention Required */}
-            <section className="mt-10">
-              <h2 className="text-lg font-semibold text-foreground">Needs Attention</h2>
-              <p className="mt-1 text-sm text-foreground-muted">Where to focus today — real, linked issues.</p>
-              <div className="mt-4">
-                <AttentionRequiredSection needsAttention={needsAttention} actionCounts={actionCounts} basePath="/government/issues" />
-              </div>
             </section>
 
             {/* B2. Civic Incidents */}

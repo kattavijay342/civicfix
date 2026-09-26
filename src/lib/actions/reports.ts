@@ -6,9 +6,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { analyzeReport, AIUnavailableError } from "@/lib/ai";
 import { findPossibleDuplicate } from "@/lib/duplicate-detection";
 import { evaluateIncidentForReport } from "@/lib/incident-linking";
-import { resolveAssignment } from "@/lib/actions/routing";
+import { loadConfiguredDepartments, routeReport, type RouteReportResult } from "@/lib/actions/routing";
 import { logStatusChange } from "@/lib/actions/status-history";
-import { notifyNewAssignment } from "@/lib/actions/notifications";
 import { categoryToDb, categoryFromDb } from "@/lib/db-enums";
 import { categoryLabels } from "@/lib/categories";
 import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
@@ -20,6 +19,7 @@ import { createNotification } from "@/lib/notifications/create";
 import { findGovernmentUsersForJurisdiction } from "@/lib/notifications/targeting";
 import { notifyGovernmentOfNewReport } from "@/lib/notifications/new-report";
 import { resolveReportJurisdiction } from "@/lib/report-jurisdiction";
+import type { ConfiguredDepartment, JurisdictionLike } from "@/lib/routing";
 import type { CivicLocation, ProblemCategory } from "@/lib/types";
 
 export type CreateReportState =
@@ -123,6 +123,39 @@ async function notifyAiAnalysisComplete(
         relatedReportId: input.reportId,
       });
     }
+  }
+}
+
+/** Phase G3 — AI recommendation -> configured department -> authorized
+ * in-charge, for a report whose AI analysis just succeeded. Runs outside
+ * the AI try/catch so a routing problem is never mislabelled as an AI
+ * failure, and never fails the already-saved report. */
+async function routeAnalyzedReport(
+  admin: ReturnType<typeof createAdminClient>,
+  input: {
+    reportId: string;
+    title: string;
+    citizenCategory: ProblemCategory;
+    analysis: Awaited<ReturnType<typeof analyzeReport>>;
+    location: JurisdictionLike;
+    departments: ConfiguredDepartment[];
+  }
+): Promise<RouteReportResult | null> {
+  try {
+    return await routeReport(admin, {
+      reportId: input.reportId,
+      title: input.title,
+      categoryLabel: categoryLabels[input.citizenCategory],
+      citizenCategory: input.citizenCategory,
+      aiCategory: categoryFromDb[input.analysis.category] ?? null,
+      aiRecommendation: input.analysis.recommended_department,
+      priority: input.analysis.priority,
+      location: input.location,
+      departments: input.departments,
+    });
+  } catch (err) {
+    console.error("Routing failed (non-fatal) for report", input.reportId, err);
+    return null;
   }
 }
 
@@ -387,6 +420,8 @@ async function performCreateReport(
     }
   }
 
+  const departments = await loadConfiguredDepartments(admin);
+
   let aiFailed = false;
   let completedAnalysis: Awaited<ReturnType<typeof analyzeReport>> | null = null;
   try {
@@ -396,6 +431,7 @@ async function performCreateReport(
       location,
       imageBase64,
       imageMimeType,
+      departmentNames: departments.map((d) => d.name),
     });
     completedAnalysis = analysis;
 
@@ -411,23 +447,24 @@ async function performCreateReport(
       .eq("id", reportId);
     await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete");
     await notifyAiAnalysisComplete(admin, { reportId, reporterId: user.id, title, analysis, location });
-
-    const assignment = await resolveAssignment(admin, category, location);
-    if (assignment) {
-      await admin.from("report_assignments").insert({
-        report_id: reportId,
-        department_id: assignment.departmentId,
-        incharge_id: assignment.inchargeId,
-        assignment_method: "auto",
-      });
-      await admin.from("reports").update({ status: "routed" }).eq("id", reportId);
-      await logStatusChange(admin, reportId, "ai_analyzed", "routed", null, "Routed to configured department");
-      await notifyNewAssignment(admin, reportId, assignment.inchargeId, title);
-    }
   } catch (err) {
     aiFailed = true;
     console.error("AI analysis failed for report", reportId, err);
   }
+
+  // No AI analysis -> no routing: the report stays "reported" (Routing
+  // pending) and is routed by retryAiAnalysis once analysis succeeds. A
+  // department is never guessed for an unanalyzed report.
+  const routing = completedAnalysis
+    ? await routeAnalyzedReport(admin, {
+        reportId,
+        title,
+        citizenCategory: category,
+        analysis: completedAnalysis,
+        location,
+        departments,
+      })
+    : null;
 
   // Phase G2 — REPORT_CREATED for the government users whose jurisdiction
   // covers this report. Sent after AI analysis so the payload carries the
@@ -458,6 +495,7 @@ async function performCreateReport(
       location,
       createdAt: new Date().toISOString(),
       severity: completedAnalysis?.severity ?? null,
+      departmentId: routing?.outcome === "routed" ? routing.departmentId : null,
       existingDuplicateCandidate: duplicateCandidate
         ? { reportId: duplicateCandidate.reportId, relationType: duplicateCandidate.relationType }
         : null,
@@ -519,10 +557,12 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
   };
 
   try {
+    const departments = await loadConfiguredDepartments(admin);
     const analysis = await analyzeWithRetry({
       description: report.description,
       category,
       location: retryLocation,
+      departmentNames: departments.map((d) => d.name),
     });
 
     await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
@@ -540,18 +580,14 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
       location: retryLocation,
     });
 
-    const assignment = await resolveAssignment(admin, category, location);
-    if (assignment) {
-      await admin.from("report_assignments").insert({
-        report_id: reportId,
-        department_id: assignment.departmentId,
-        incharge_id: assignment.inchargeId,
-        assignment_method: "auto",
-      });
-      await admin.from("reports").update({ status: "routed" }).eq("id", reportId);
-      await logStatusChange(admin, reportId, "ai_analyzed", "routed", null, "Routed to configured department");
-      await notifyNewAssignment(admin, reportId, assignment.inchargeId, report.title);
-    }
+    await routeAnalyzedReport(admin, {
+      reportId,
+      title: report.title,
+      citizenCategory: category,
+      analysis,
+      location: retryLocation,
+      departments,
+    });
 
     return {};
   } catch {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
-import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Loader2, AlertCircle, CheckCircle2, Send, CalendarClock } from "lucide-react";
 import { createReminder, type ReminderFormState } from "@/lib/actions/reminders";
 import { REMINDER_TITLE_MAX, REMINDER_MESSAGE_MAX } from "@/lib/reminders-shared";
 
@@ -24,6 +24,16 @@ function tomorrowIstValue(): string {
   return `${yyyy}-${mm}-${dd}T10:00`;
 }
 
+const OUTCOME_MESSAGES: Record<NonNullable<ReminderFormState["outcome"]>, string> = {
+  sent: "Follow-up sent to the department in-charge.",
+  queued: "Follow-up queued — delivery will be retried automatically.",
+  scheduled: "Reminder scheduled.",
+};
+
+/** G6 — one form, two submit buttons: "Send now" delivers the follow-up
+ * immediately, "Schedule reminder" (the existing Phase 4 flow) queues it
+ * for the chosen time. The recipient is never part of the form — the
+ * server derives the effective in-charge (src/lib/actions/reminders.ts). */
 export function ReminderForm({ reportId }: { reportId: string }) {
   const action = createReminder.bind(null, reportId);
   const [state, formAction, pending] = useActionState(action, initialState);
@@ -43,32 +53,32 @@ export function ReminderForm({ reportId }: { reportId: string }) {
     <form action={formAction} className="mt-4 flex flex-col gap-3 border-t border-border pt-4">
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <label className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-foreground-muted">Reminder title</span>
+        <span className="text-xs font-medium text-foreground-muted">Subject (optional)</span>
         <input
           name="title"
-          required
           maxLength={REMINDER_TITLE_MAX}
           className={inputClasses}
-          placeholder="e.g. Confirm site visit was completed"
+          placeholder="e.g. Status update needed"
           aria-invalid={!!state.error}
           aria-describedby={state.error ? "reminder-form-error" : undefined}
         />
       </label>
       <label className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-foreground-muted">Instruction</span>
+        <span className="text-xs font-medium text-foreground-muted">Message to the department in-charge</span>
         <textarea
           name="message"
-          rows={2}
+          rows={3}
           required
+          minLength={5}
           maxLength={REMINDER_MESSAGE_MAX}
           className={inputClasses}
-          placeholder="What should the department in-charge do?"
+          placeholder="e.g. Please provide an update on this issue."
           aria-invalid={!!state.error}
           aria-describedby={state.error ? "reminder-form-error" : undefined}
         />
       </label>
       <div>
-        <span className="text-xs font-medium text-foreground-muted">When</span>
+        <span className="text-xs font-medium text-foreground-muted">Schedule for later (optional)</span>
         <div className="mt-1.5 flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -80,7 +90,6 @@ export function ReminderForm({ reportId }: { reportId: string }) {
           <input
             type="datetime-local"
             name="scheduledAt"
-            required
             aria-label="Reminder date and time"
             aria-invalid={!!state.error}
             aria-describedby={state.error ? "reminder-form-error" : undefined}
@@ -100,17 +109,31 @@ export function ReminderForm({ reportId }: { reportId: string }) {
       {state.success && (
         <p role="status" className="flex items-center gap-1.5 text-xs font-medium text-civic-700">
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          Reminder scheduled.
+          {OUTCOME_MESSAGES[state.outcome ?? "scheduled"]}
         </p>
       )}
-      <button
-        type="submit"
-        disabled={pending}
-        className="inline-flex w-fit items-center gap-2 rounded-full bg-civic-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-civic-700 disabled:opacity-60"
-      >
-        {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
-        Schedule reminder
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="submit"
+          name="timing"
+          value="now"
+          disabled={pending}
+          className="inline-flex min-h-10 items-center gap-2 rounded-full bg-civic-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-civic-700 disabled:opacity-60"
+        >
+          {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <Send className="h-3.5 w-3.5" aria-hidden="true" />}
+          Send now
+        </button>
+        <button
+          type="submit"
+          name="timing"
+          value="scheduled"
+          disabled={pending}
+          className="inline-flex min-h-10 items-center gap-2 rounded-full border border-civic-200 bg-white px-4 py-2 text-xs font-semibold text-civic-700 transition hover:border-civic-400 disabled:opacity-60"
+        >
+          <CalendarClock className="h-3.5 w-3.5" aria-hidden="true" />
+          Schedule reminder
+        </button>
+      </div>
     </form>
   );
 }

@@ -260,3 +260,32 @@ describe("analyzeReport — malformed AI response handling", () => {
     expect(result.recommended_action).toContain("Ramesh Kumar");
   });
 });
+
+describe("analyzeReport — Phase G3 department recommendation", () => {
+  const departmentNames = ["Roads & Infrastructure", "Water Supply", "Electrical"];
+
+  it("constrains recommended_department to the configured departments (prompt + schema enum)", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockResolvedValue({ text: JSON.stringify(validAiResponse) });
+
+    await analyzeReport({ ...validInput, departmentNames });
+
+    const request = generateContentMock.mock.calls[0][0];
+    const prompt: string = request.contents[0].parts[0].text;
+    expect(prompt).toContain("must be exactly one of these configured CivicFix departments");
+    expect(prompt).toContain("Roads & Infrastructure; Water Supply; Electrical");
+    expect(request.config.responseSchema.properties.recommended_department.enum).toEqual(departmentNames);
+    // The shared base schema is never mutated by a per-call enum.
+    await analyzeReport(validInput);
+    expect(generateContentMock.mock.calls[1][0].config.responseSchema.properties.recommended_department.enum).toBeUndefined();
+  });
+
+  it("still returns the model's text as-is — validation against configured departments happens in routing", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockResolvedValue({
+      text: JSON.stringify({ ...validAiResponse, recommended_department: "Roads & Buildings Department" }),
+    });
+    const result = await analyzeReport({ ...validInput, departmentNames });
+    expect(result.recommended_department).toBe("Roads & Buildings Department");
+  });
+});

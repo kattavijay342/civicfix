@@ -36,6 +36,10 @@ export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; 
     : citizenLink;
   const links = [...publicLinks, roleLink];
   const notificationsHref = profile ? "/notifications" : "/sign-in";
+  // "Report a Problem" is a citizen action: shown to signed-out visitors
+  // (public site, unchanged) and citizens; hidden for government /
+  // department in-charge / admin. Visibility only — not a security boundary.
+  const showReportCta = !profile || profile.role === "citizen";
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -132,10 +136,12 @@ export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; 
               Sign In
             </Link>
           )}
-          <CTAButton href="/report" size="md">
-            <CirclePlus className="h-4 w-4" aria-hidden="true" />
-            Report a Problem
-          </CTAButton>
+          {showReportCta && (
+            <CTAButton href="/report" size="md">
+              <CirclePlus className="h-4 w-4" aria-hidden="true" />
+              Report a Problem
+            </CTAButton>
+          )}
         </div>
 
         <button
@@ -202,10 +208,12 @@ export function Navbar({ profile, unreadCount = 0 }: { profile: Profile | null; 
                 Sign In
               </Link>
             )}
-            <CTAButton href="/report" size="md" className="w-full">
-              <CirclePlus className="h-4 w-4" aria-hidden="true" />
-              Report a Problem
-            </CTAButton>
+            {showReportCta && (
+              <CTAButton href="/report" size="md" className="w-full">
+                <CirclePlus className="h-4 w-4" aria-hidden="true" />
+                Report a Problem
+              </CTAButton>
+            )}
           </div>
         </div>
       )}

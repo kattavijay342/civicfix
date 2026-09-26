@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ReminderStatus } from "@/lib/reminders-shared";
 import { createNotification } from "@/lib/notifications/create";
+import { checkInchargeAccess } from "@/lib/data/incharge-access";
 
 export const REMINDER_MAX_ATTEMPTS = 3;
 /** Fixed backoff before a failed-but-retryable reminder becomes due again —
@@ -74,6 +75,31 @@ export async function processDueReminders(admin: SupabaseClient): Promise<Proces
   return summary;
 }
 
+/**
+ * G6 — delivers ONE just-created reminder immediately ("Send now") through
+ * the exact same claim → effective-in-charge re-check → notification →
+ * sent/failed/retry path the scheduler uses, so an immediate follow-up has
+ * no separate delivery logic. The claim is the same conditional UPDATE, so
+ * if a cron run grabbed the row first this is a no-op (never two
+ * notifications). A transient failure leaves it `scheduled` with backoff —
+ * the cron then retries it like any other reminder.
+ */
+export async function deliverReminderNow(admin: SupabaseClient, reminderId: string): Promise<ReminderStatus | null> {
+  const { data: claimed } = await admin
+    .from("reminders")
+    .update({ status: "processing", processed_at: new Date().toISOString() })
+    .eq("id", reminderId)
+    .eq("status", "scheduled")
+    .select("*");
+
+  const reminder = ((claimed ?? []) as Reminder[])[0];
+  if (!reminder) return null;
+
+  const summary: ProcessRemindersSummary = { claimed: 1, sent: 0, failedPermanently: 0, retried: 0 };
+  await resolveClaimedReminder(admin, reminder, (reminder.attempt_count ?? 0) + 1, summary);
+  return summary.sent ? "sent" : summary.failedPermanently ? "failed" : "scheduled";
+}
+
 async function resolveClaimedReminder(
   admin: SupabaseClient,
   reminder: Reminder,
@@ -95,6 +121,24 @@ async function resolveClaimedReminder(
           status: "failed",
           attempt_count: nextAttempt,
           failure_reason: "Recipient no longer exists.",
+        })
+        .eq("id", reminder.id);
+      summary.failedPermanently += 1;
+      return;
+    }
+
+    // G5 — the recipient was the effective in-charge when the reminder was
+    // scheduled; if they've since been deactivated/moved/re-scoped, the
+    // reminder (and the report title in it) must not reach them. Permanent:
+    // retrying can't restore their standing.
+    const recipientAccess = await checkInchargeAccess(admin, reminder.recipient_id, reminder.report_id);
+    if (!recipientAccess.ok) {
+      await admin
+        .from("reminders")
+        .update({
+          status: "failed",
+          attempt_count: nextAttempt,
+          failure_reason: "Recipient is no longer the report's active department in-charge.",
         })
         .eq("id", reminder.id);
       summary.failedPermanently += 1;

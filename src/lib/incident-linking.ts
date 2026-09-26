@@ -2,7 +2,8 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { findIncidentMatch } from "./incident-detection";
 import { computeIncidentPriority, computeIncidentConfidence, type DbLevel } from "./incident-priority";
-import { resolveAssignment } from "./actions/routing";
+import { departmentIdForCategory } from "./actions/routing";
+import { isJurisdictionCompatible } from "./routing";
 import { createNotification } from "./notifications/create";
 import { findGovernmentUsersForJurisdiction } from "./notifications/targeting";
 import { categoryToDb } from "./db-enums";
@@ -25,6 +26,11 @@ export interface EvaluateIncidentInput {
    * derived from `Object.values(...)` — TypeScript can't narrow to the
    * literal DbLevel union at the call site. */
   severity: string | null;
+  /** Phase G3 — the department this report was actually routed to, so a
+   * new incident is owned by the same department. Null when routing
+   * didn't happen (AI unavailable), in which case the configured category
+   * mapping decides, exactly as before G3. */
+  departmentId?: string | null;
   /** Phase 6A's existing report-level classification (src/lib/
    * duplicate-detection.ts), when this same report already triggered it. */
   existingDuplicateCandidate?: { reportId: string; relationType: "duplicate" | "related" } | null;
@@ -112,7 +118,7 @@ export async function evaluateIncidentForReport(admin: SupabaseClient, input: Ev
     .eq("report_id", match.reportId)
     .maybeSingle();
 
-  const assignment = await resolveAssignment(admin, input.category, input.location);
+  const departmentId = input.departmentId ?? (await departmentIdForCategory(admin, input.category));
 
   const oldestReportAgeDays = Math.max(
     ageInDays(matchedReport.created_at as string),
@@ -146,7 +152,7 @@ export async function evaluateIncidentForReport(admin: SupabaseClient, input: Ev
       subcategory: input.subcategory ?? null,
       severity,
       priority,
-      department_id: assignment?.departmentId ?? null,
+      department_id: departmentId,
       latitude,
       longitude,
       confidence: match.score,
@@ -219,7 +225,7 @@ async function recomputeIncidentAggregate(admin: SupabaseClient, incidentId: str
  * linked to one incident"). Recipients are the incident's own department's
  * active in-charges plus government users whose configured jurisdiction
  * covers the report location that triggered this event — the exact same
- * two audiences (src/lib/actions/reports.ts's notifyNewAssignment /
+ * two audiences (src/lib/notifications/report-assigned.ts /
  * notifyAiAnalysisComplete) this app already notifies for an individual
  * report, just deduplicated to one message each.
  */
@@ -238,12 +244,16 @@ async function notifyIncidentEvent(
 
   const recipients = new Set<string>();
   if (incident.department_id) {
+    // Only in-charges whose jurisdiction covers the triggering report — a
+    // Roads in-charge for another district is never told about this area.
     const { data: incharges } = await admin
       .from("department_incharges")
-      .select("profile_id")
+      .select("profile_id, gov_state, gov_district, gov_constituency, gov_area")
       .eq("department_id", incident.department_id)
       .eq("is_active", true);
-    for (const i of incharges ?? []) recipients.add(i.profile_id);
+    for (const i of incharges ?? []) {
+      if (isJurisdictionCompatible(i, triggeringLocation)) recipients.add(i.profile_id);
+    }
   }
   for (const id of await findGovernmentUsersForJurisdiction(admin, triggeringLocation)) {
     recipients.add(id);

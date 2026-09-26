@@ -1,7 +1,9 @@
 import "server-only";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { ReminderStatus } from "@/lib/reminders-shared";
+import { getEffectiveAssignments } from "@/lib/data/incharge-access";
 
 export interface ReminderView {
   id: string;
@@ -10,9 +12,16 @@ export interface ReminderView {
   scheduledAt: string;
   status: ReminderStatus;
   createdByName: string | null;
+  /** Only while the recipient is still the report's effective in-charge —
+   * a deactivated/moved predecessor is never named (G6 privacy). */
   recipientName: string | null;
+  /** The recipient is no longer the report's effective in-charge. */
+  recipientIsFormer: boolean;
   createdAt: string;
   sentAt: string | null;
+  /** When the recipient opened the delivered in-app notification — the
+   * only "response" the data model actually records for a reminder. */
+  seenAt: string | null;
   failureReason: string | null;
   isOwnCreation: boolean;
 }
@@ -24,7 +33,11 @@ export interface ReminderView {
  * department in-charge) — the admin client below is only used afterwards,
  * to resolve display names for rows RLS already allowed this caller to see.
  */
-export async function getReportReminders(reportId: string, callerId: string): Promise<ReminderView[]> {
+export async function getReportReminders(
+  reportId: string,
+  callerId: string,
+  effectiveInchargeId: string | null
+): Promise<ReminderView[]> {
   const supabase = await createClient();
   const { data: reminders } = await supabase
     .from("reminders")
@@ -36,21 +49,94 @@ export async function getReportReminders(reportId: string, callerId: string): Pr
 
   const admin = createAdminClient();
   const profileIds = [...new Set(reminders.flatMap((r) => [r.created_by, r.recipient_id]))];
-  const { data: profiles } = await admin.from("profiles").select("id, full_name").in("id", profileIds);
+  const notificationIds = reminders.map((r) => r.notification_id).filter((id): id is string => !!id);
+  const [{ data: profiles }, { data: notifications }] = await Promise.all([
+    admin.from("profiles").select("id, full_name").in("id", profileIds),
+    notificationIds.length
+      ? admin.from("notifications").select("id, read_at").in("id", notificationIds)
+      : Promise.resolve({ data: [] as Array<{ id: string; read_at: string | null }> }),
+  ]);
   const nameById = new Map((profiles ?? []).map((p) => [p.id, p.full_name]));
+  const readAtById = new Map((notifications ?? []).map((n) => [n.id, n.read_at]));
 
-  return reminders.map((r) => ({
+  return reminders.map((r) => {
+    const recipientIsFormer = r.recipient_id !== effectiveInchargeId;
+    return {
+      id: r.id,
+      title: r.title,
+      message: r.message,
+      scheduledAt: r.scheduled_at,
+      status: r.status as ReminderStatus,
+      createdByName: nameById.get(r.created_by) ?? null,
+      recipientName: recipientIsFormer ? null : (nameById.get(r.recipient_id) ?? null),
+      recipientIsFormer,
+      createdAt: r.created_at,
+      sentAt: r.sent_at,
+      seenAt: (r.notification_id && readAtById.get(r.notification_id)) || null,
+      failureReason: r.failure_reason,
+      isOwnCreation: r.created_by === callerId,
+    };
+  });
+}
+
+// ============================================================
+// G6 — department in-charge's "Government follow-ups" inbox.
+// ============================================================
+
+export interface DepartmentFollowUpItem {
+  id: string;
+  reportId: string;
+  reportTitle: string;
+  reportStatus: string | null;
+  title: string;
+  message: string;
+  senderName: string | null;
+  sentAt: string;
+}
+
+/**
+ * Delivered follow-ups addressed to this in-charge, on reports they are
+ * still EFFECTIVELY assigned (G4). The report-id restriction is part of
+ * the query itself — rows for a stale assignment are never fetched — and
+ * the read goes through the caller's RLS session (reminders_select /
+ * reports_select). Only `sent` rows: a scheduled reminder reaches the
+ * in-charge at its due time, not before. `admin` resolves sender names only.
+ */
+export async function loadDepartmentFollowUps(
+  readClient: Pick<SupabaseClient, "from">,
+  admin: Pick<SupabaseClient, "from">,
+  userId: string,
+  effectiveReportIds: string[],
+  limit = 10
+): Promise<DepartmentFollowUpItem[]> {
+  if (effectiveReportIds.length === 0) return [];
+
+  const { data: rows } = await readClient
+    .from("reminders")
+    .select("id, report_id, created_by, title, message, sent_at")
+    .eq("recipient_id", userId)
+    .eq("status", "sent")
+    .in("report_id", effectiveReportIds)
+    .order("sent_at", { ascending: false })
+    .limit(limit);
+  if (!rows || rows.length === 0) return [];
+
+  const [{ data: reports }, { data: senders }] = await Promise.all([
+    readClient.from("reports").select("id, title, status").in("id", [...new Set(rows.map((r) => r.report_id))]),
+    admin.from("profiles").select("id, full_name").in("id", [...new Set(rows.map((r) => r.created_by))]),
+  ]);
+  const reportById = new Map((reports ?? []).map((r) => [r.id, r]));
+  const senderById = new Map((senders ?? []).map((p) => [p.id, p.full_name]));
+
+  return rows.map((r) => ({
     id: r.id,
+    reportId: r.report_id,
+    reportTitle: reportById.get(r.report_id)?.title ?? "Report",
+    reportStatus: reportById.get(r.report_id)?.status ?? null,
     title: r.title,
     message: r.message,
-    scheduledAt: r.scheduled_at,
-    status: r.status as ReminderStatus,
-    createdByName: nameById.get(r.created_by) ?? null,
-    recipientName: nameById.get(r.recipient_id) ?? null,
-    createdAt: r.created_at,
+    senderName: senderById.get(r.created_by) ?? null,
     sentAt: r.sent_at,
-    failureReason: r.failure_reason,
-    isOwnCreation: r.created_by === callerId,
   }));
 }
 
@@ -117,12 +203,16 @@ export async function getFollowUpCenter(): Promise<FollowUpCenterGroups> {
   const admin = createAdminClient();
   const reportIds = [...new Set(reminders.map((r) => r.report_id))];
   const recipientIds = [...new Set(reminders.map((r) => r.recipient_id))];
-  const [{ data: reports }, { data: profiles }] = await Promise.all([
+  const [{ data: reports }, { data: profiles }, effective] = await Promise.all([
     admin.from("reports").select("id, title").in("id", reportIds),
     admin.from("profiles").select("id, full_name").in("id", recipientIds),
+    // G6 — one batched effective-assignment load per distinct recipient
+    // (a handful of in-charges), so a deactivated/moved one isn't named.
+    Promise.all(recipientIds.map(async (id) => [id, await getEffectiveAssignments(admin, id)] as const)),
   ]);
   const titleByReport = new Map((reports ?? []).map((r) => [r.id, r.title]));
   const nameByProfile = new Map((profiles ?? []).map((p) => [p.id, p.full_name]));
+  const effectivePairs = new Set(effective.flatMap(([id, rows]) => rows.map((a) => `${id}:${a.reportId}`)));
 
   const todayEnd = istTodayEndUtc();
   const nowIso = new Date().toISOString();
@@ -136,7 +226,9 @@ export async function getFollowUpCenter(): Promise<FollowUpCenterGroups> {
       title: r.title,
       scheduledAt: r.scheduled_at,
       status: r.status as ReminderStatus,
-      recipientName: nameByProfile.get(r.recipient_id) ?? null,
+      recipientName: effectivePairs.has(`${r.recipient_id}:${r.report_id}`)
+        ? (nameByProfile.get(r.recipient_id) ?? null)
+        : null,
     };
 
     if (r.status !== "scheduled") {

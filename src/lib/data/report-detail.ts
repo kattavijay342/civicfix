@@ -33,6 +33,7 @@ export interface ReportAssignment {
   departmentName: string;
   inchargeName: string | null;
   inchargeId: string | null;
+  assignedAt: string;
 }
 
 export interface FollowUpEntry {
@@ -212,6 +213,7 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail | 
       departmentName: department?.name ?? "Unassigned",
       inchargeName,
       inchargeId: assignmentRes.data.incharge_id,
+      assignedAt: assignmentRes.data.assigned_at,
     };
   }
 

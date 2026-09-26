@@ -149,12 +149,28 @@ const RESPONSE_SCHEMA = {
   ],
 } as const;
 
+/** When the configured department names are known, Gemini's structured
+ * output is constrained to exactly those names (an enum), so the
+ * recommendation is directly resolvable. The server still re-validates it
+ * against the `departments` table (src/lib/routing.ts) — the enum is a
+ * quality aid, not the trust boundary. */
+function responseSchemaFor(departmentNames: string[]) {
+  if (departmentNames.length === 0) return RESPONSE_SCHEMA;
+  return {
+    ...RESPONSE_SCHEMA,
+    properties: {
+      ...RESPONSE_SCHEMA.properties,
+      recommended_department: { type: Type.STRING, enum: departmentNames },
+    },
+  };
+}
+
 /** Shared "do not invent" ground rules, centralized so they appear exactly
  * once instead of being copy-pasted across prompt sections (Step "AI
  * prompt quality"). */
 const INTEGRITY_RULES = [
   "- Do not invent any government official's name, title, badge number, or contact information anywhere in your response.",
-  "- \"recommended_department\" is an informational suggestion only (e.g. \"Roads & Infrastructure\") — it is NEVER used to actually route the report, so do not invent a specific office, address, or phone number.",
+  "- \"recommended_department\" names a department, never a person, office, address, or phone number. It is a recommendation: CivicFix validates it against its own configured departments before any routing.",
   "- Never invent dates, measurements, incident history, or legal claims that were not provided to you.",
   "- Use ONLY the description, category, location, and image (if attached) given below — do not assume facts about the location or citizen that weren't stated.",
   "- If a field cannot be reliably determined from what was provided, return null for it rather than guessing.",
@@ -166,6 +182,7 @@ function buildPrompt(input: {
   category: ProblemCategory;
   location: CivicLocation;
   hasImage: boolean;
+  departmentNames: string[];
 }) {
   return [
     "You are a civic-issue triage assistant for CivicFix, a citizen issue-reporting platform in India.",
@@ -192,6 +209,11 @@ function buildPrompt(input: {
     "- \"observations\" should be short, concrete, hedged phrases (e.g. \"appears to show a large road-surface depression\"), not certainties.",
     "",
     "Recommendations:",
+    input.departmentNames.length > 0
+      ? "- \"recommended_department\" must be exactly one of these configured CivicFix departments: " +
+        input.departmentNames.join("; ") +
+        ". Pick the one responsible for the problem you classified in \"category\"."
+      : "- \"recommended_department\" is the name of the municipal department best suited to handle the problem.",
     "- \"recommended_action\" is a single concise sentence.",
     "- \"action_steps\" is an ordered list of 2-4 short, practical next steps a department would take (inspect, temporary mitigation, repair, verify/close-out with evidence) — recommendations only, never phrased as already completed.",
     "",
@@ -211,6 +233,8 @@ export async function analyzeReport(input: {
   location: CivicLocation;
   imageBase64?: string;
   imageMimeType?: string;
+  /** Configured department names (the `departments` table). */
+  departmentNames?: string[];
 }): Promise<AIAnalysisResult> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -218,9 +242,10 @@ export async function analyzeReport(input: {
   }
 
   const ai = new GoogleGenAI({ apiKey });
+  const departmentNames = input.departmentNames ?? [];
 
   const parts: Array<Record<string, unknown>> = [
-    { text: buildPrompt({ ...input, hasImage: Boolean(input.imageBase64) }) },
+    { text: buildPrompt({ ...input, hasImage: Boolean(input.imageBase64), departmentNames }) },
   ];
   if (input.imageBase64 && input.imageMimeType) {
     parts.push({ inlineData: { mimeType: input.imageMimeType, data: input.imageBase64 } });
@@ -233,7 +258,7 @@ export async function analyzeReport(input: {
       contents: [{ role: "user", parts }],
       config: {
         responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA,
+        responseSchema: responseSchemaFor(departmentNames),
       },
     });
     text = response.text;

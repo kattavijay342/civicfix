@@ -2,22 +2,6 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createNotification } from "@/lib/notifications/create";
 
-export async function notifyNewAssignment(
-  admin: SupabaseClient,
-  reportId: string,
-  inchargeId: string | null,
-  reportTitle: string
-) {
-  if (!inchargeId) return;
-  await createNotification(admin, {
-    recipientId: inchargeId,
-    type: "report_assigned",
-    title: "New issue assigned to you",
-    body: `"${reportTitle}" was routed to you.`,
-    relatedReportId: reportId,
-  });
-}
-
 const STATUS_CHANGE_LABEL: Record<string, string> = {
   acknowledged: "acknowledged",
   in_progress: "marked in progress",

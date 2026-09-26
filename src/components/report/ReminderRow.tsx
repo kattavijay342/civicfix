@@ -11,9 +11,9 @@ const statusConfig: Record<
   { label: string; text: string; bg: string; icon: typeof Clock }
 > = {
   scheduled: { label: "Scheduled", text: "text-status-routed", bg: "bg-status-routed-bg", icon: Clock },
-  processing: { label: "Processing", text: "text-status-progress", bg: "bg-status-progress-bg", icon: Loader2 },
-  sent: { label: "Sent", text: "text-status-resolved", bg: "bg-status-resolved-bg", icon: CheckCircle2 },
-  failed: { label: "Failed", text: "text-priority-critical", bg: "bg-priority-critical-bg", icon: XCircle },
+  processing: { label: "Delivering", text: "text-status-progress", bg: "bg-status-progress-bg", icon: Loader2 },
+  sent: { label: "Delivered", text: "text-status-resolved", bg: "bg-status-resolved-bg", icon: CheckCircle2 },
+  failed: { label: "Not delivered", text: "text-priority-critical", bg: "bg-priority-critical-bg", icon: XCircle },
   cancelled: { label: "Cancelled", text: "text-foreground-muted", bg: "bg-surface-muted", icon: Ban },
 };
 
@@ -40,7 +40,7 @@ export function ReminderRow({ reminder, reportId }: { reminder: ReminderView; re
   }
 
   return (
-    <li className="border-t border-border pt-4 first:border-t-0 first:pt-0">
+    <li className="border-t border-border pt-4 first:border-t-0 first:pt-0" data-testid="follow-up-history-item">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="text-sm font-semibold text-foreground">{reminder.title}</p>
@@ -58,12 +58,20 @@ export function ReminderRow({ reminder, reportId }: { reminder: ReminderView; re
         </span>
       </div>
       <p className="mt-2 text-xs text-foreground-muted">
-        For <span className="font-medium text-foreground">{reminder.recipientName ?? "the department in-charge"}</span> ·
-        Due {formatIst(reminder.scheduledAt)}
-        {reminder.createdByName && <> · Scheduled by {reminder.createdByName}</>}
+        To{" "}
+        <span className="font-medium text-foreground">
+          {reminder.recipientIsFormer
+            ? "a previous department in-charge"
+            : `${reminder.recipientName ?? "the department in-charge"} (Department in-charge)`}
+        </span>{" "}
+        · {reminder.status === "scheduled" ? "Due" : "For"} {formatIst(reminder.scheduledAt)}
+        {reminder.createdByName && <> · From {reminder.createdByName}</>}
       </p>
       {reminder.status === "sent" && reminder.sentAt && (
-        <p className="mt-1 text-xs text-civic-700">Notification sent {formatIst(reminder.sentAt)}.</p>
+        <p className="mt-1 text-xs text-civic-700">
+          In-app notification delivered {formatIst(reminder.sentAt)}
+          {reminder.seenAt ? ` · Seen ${formatIst(reminder.seenAt)}` : " · Not opened yet"}.
+        </p>
       )}
       {reminder.status === "failed" && reminder.failureReason && (
         <p className="mt-1 text-xs text-priority-critical">Could not be delivered: {reminder.failureReason}</p>

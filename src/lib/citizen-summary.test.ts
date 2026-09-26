@@ -73,7 +73,7 @@ describe("buildCitizenSummary", () => {
   it("includes the assigned in-charge name when an assignment exists", () => {
     const report = baseReport({
       status: "ROUTED",
-      assignment: { departmentName: "Roads & Engineering", inchargeName: "Ravi Kumar", inchargeId: "incharge-1" },
+      assignment: { departmentName: "Roads & Engineering", inchargeName: "Ravi Kumar", inchargeId: "incharge-1", assignedAt: "2026-01-01T00:00:00Z" },
     });
     const summary = buildCitizenSummary(report);
     expect(summary).toContain("Roads & Engineering");
@@ -83,7 +83,7 @@ describe("buildCitizenSummary", () => {
   it("never fabricates an in-charge name when none is assigned yet", () => {
     const report = baseReport({
       status: "ROUTED",
-      assignment: { departmentName: "Roads & Engineering", inchargeName: null, inchargeId: null },
+      assignment: { departmentName: "Roads & Engineering", inchargeName: null, inchargeId: null, assignedAt: "2026-01-01T00:00:00Z" },
     });
     const summary = buildCitizenSummary(report);
     expect(summary).toContain("Roads & Engineering");

@@ -164,13 +164,14 @@ test.describe.serial("G2 citizen -> government connectivity", () => {
 
     await page.goto("/government");
     await expect(page.getByRole("heading", { name: "New & Recent Reports" })).toBeVisible({ timeout: 20_000 });
-    const recent = page.locator("li", { hasText: TITLE });
+    // Scoped to the New & Recent Reports section: the same report can also
+    // appear as a G5 Action Required card (li[data-testid="action-card"]).
+    const recentSection = page.locator("section", { has: page.getByRole("heading", { name: "New & Recent Reports" }) });
+    const recent = recentSection.locator("li", { hasText: TITLE });
     await expect(recent).toBeVisible();
     await expect(recent.getByText("New", { exact: true })).toBeVisible();
     await expect(recent.getByRole("link", { name: "View issue" })).toHaveAttribute("href", `/reports/${reportId}`);
-    await page
-      .locator("section", { has: page.getByRole("heading", { name: "New & Recent Reports" }) })
-      .screenshot({ path: "test-results/g2-recent-reports.png" });
+    await recentSection.screenshot({ path: "test-results/g2-recent-reports.png" });
 
     await page.goto(`/government/issues?search=${encodeURIComponent(RUN_ID)}`);
     await expect(page.getByText(TITLE).first()).toBeVisible({ timeout: 15_000 });

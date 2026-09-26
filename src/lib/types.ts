@@ -72,6 +72,10 @@ export interface CivicIssue {
   priority: Priority;
   status: IssueStatus;
   reportedDate: string;
+  /** reports.updated_at — real data only; absent for sample data. */
+  updatedAt?: string;
+  /** report_assignments.assigned_at — absent until routed. */
+  assignedAt?: string;
   department: string;
   inCharge?: string;
   imageUrl?: string;
@@ -80,6 +84,9 @@ export interface CivicIssue {
   lastFollowUp?: string;
   nextFollowUp?: string;
   severity?: number;
+  /** Real AI-assessed severity from `reports.severity` (null/absent until
+   * AI analysis succeeds) — distinct from the sample-data score above. */
+  aiSeverity?: Priority;
   confidence?: number;
   aiExplanation?: string;
   description?: string;

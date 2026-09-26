@@ -1,15 +1,31 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { processDueReminders, REMINDER_MAX_ATTEMPTS } from "@/lib/reminders";
+import { processDueReminders, deliverReminderNow, REMINDER_MAX_ATTEMPTS } from "@/lib/reminders";
 import { makeFakeClient, forceNextError, clearForcedErrors, type FakeDb } from "../../test/fake-supabase";
 
 const HOUR = 60 * 60 * 1000;
+const NRT_LOC = { state: "Andhra Pradesh", district: "Palnadu", constituency: "Narasaraopet", area: "Narasaraopet Municipality" };
 
 function makeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
     reminders: [],
-    profiles: [{ id: "recipient-1", full_name: "Incharge One" }],
+    profiles: [{ id: "recipient-1", full_name: "Incharge One", role: "department_incharge", department_id: "dept-1" }],
     reports: [{ id: "report-1", title: "Pothole on Main Road" }],
     notifications: [],
+    // G5 — the recipient must still be the report's EFFECTIVE in-charge
+    // (G4 rule) at send time.
+    report_assignments: [{ report_id: "report-1", department_id: "dept-1", incharge_id: "recipient-1" }],
+    report_locations: [{ report_id: "report-1", ...NRT_LOC }],
+    department_incharges: [
+      {
+        profile_id: "recipient-1",
+        department_id: "dept-1",
+        is_active: true,
+        gov_state: NRT_LOC.state,
+        gov_district: NRT_LOC.district,
+        gov_constituency: NRT_LOC.constituency,
+        gov_area: NRT_LOC.area,
+      },
+    ],
     ...overrides,
   };
 }
@@ -125,10 +141,51 @@ describe("processDueReminders — retry / backoff / permanent failure", () => {
   });
 });
 
+describe("processDueReminders — G5 stale recipient", () => {
+  const staleCases: Array<[string, Partial<FakeDb>]> = [
+    ["deactivated", { department_incharges: [{ profile_id: "recipient-1", department_id: "dept-1", is_active: false, gov_state: NRT_LOC.state, gov_district: NRT_LOC.district, gov_constituency: NRT_LOC.constituency, gov_area: NRT_LOC.area }] }],
+    ["moved to another department", { profiles: [{ id: "recipient-1", full_name: "Incharge One", role: "department_incharge", department_id: "dept-2" }] }],
+    ["demoted", { profiles: [{ id: "recipient-1", full_name: "Incharge One", role: "citizen", department_id: "dept-1" }] }],
+    ["no longer the assigned in-charge", { report_assignments: [{ report_id: "report-1", department_id: "dept-1", incharge_id: "someone-else" }] }],
+  ];
+  it.each(staleCases)("fails permanently and sends nothing when the recipient was %s", async (_label, overrides) => {
+    const db = makeDb({ reminders: [dueReminder()], ...overrides });
+    const summary = await processDueReminders(makeFakeClient(db) as never);
+
+    expect(summary).toEqual({ claimed: 1, sent: 0, failedPermanently: 1, retried: 0 });
+    expect(db.reminders[0].status).toBe("failed");
+    expect(db.reminders[0].failure_reason).toMatch(/no longer the report's active department in-charge/);
+    expect(db.notifications).toHaveLength(0);
+  });
+});
+
 describe("processDueReminders — empty input", () => {
   it("returns a zeroed summary and touches nothing when there are no reminders", async () => {
     const db = makeDb();
     const summary = await processDueReminders(makeFakeClient(db) as never);
     expect(summary).toEqual({ claimed: 0, sent: 0, failedPermanently: 0, retried: 0 });
+  });
+});
+
+describe("G6 deliverReminderNow — immediate follow-up via the scheduler path", () => {
+  it("delivers exactly that reminder, and a concurrent cron run can't deliver it again", async () => {
+    const db = makeDb({ reminders: [dueReminder({ scheduled_at: new Date().toISOString() })] });
+    expect(await deliverReminderNow(makeFakeClient(db) as never, "reminder-1")).toBe("sent");
+    expect(await processDueReminders(makeFakeClient(db) as never)).toMatchObject({ claimed: 0 });
+    expect(await deliverReminderNow(makeFakeClient(db) as never, "reminder-1")).toBeNull();
+    expect(db.notifications).toHaveLength(1);
+  });
+
+  it("is a no-op when the cron already claimed the row", async () => {
+    const db = makeDb({ reminders: [dueReminder({ status: "processing" })] });
+    expect(await deliverReminderNow(makeFakeClient(db) as never, "reminder-1")).toBeNull();
+    expect(db.notifications).toHaveLength(0);
+  });
+
+  it("fails permanently (no notification) for a recipient who is no longer effective", async () => {
+    const db = makeDb({ reminders: [dueReminder()] });
+    db.department_incharges[0].is_active = false;
+    expect(await deliverReminderNow(makeFakeClient(db) as never, "reminder-1")).toBe("failed");
+    expect(db.notifications).toHaveLength(0);
   });
 });

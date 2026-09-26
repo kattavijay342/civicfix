@@ -1,6 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
-import { MapPin, Building2, CalendarDays, MessageSquare, ImageOff } from "lucide-react";
+import { MapPin, Building2, CalendarDays, MessageSquare, ImageOff, ClipboardCheck, History } from "lucide-react";
 import { PriorityBadge } from "@/components/ui/PriorityBadge";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { CivicIssue } from "@/lib/types";
@@ -8,12 +8,23 @@ import { categoryLabels } from "@/lib/categories";
 import { agingLabel, agingClass } from "@/lib/aging";
 import { locationCompact, locationOneLine } from "@/lib/location-format";
 import { cn } from "@/lib/utils";
+import { timeAgo } from "@/lib/time-ago";
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-export function IssueCard({ issue, linkToDetail = true }: { issue: CivicIssue; linkToDetail?: boolean }) {
+export function IssueCard({
+  issue,
+  linkToDetail = true,
+  showWorkflowMeta = false,
+}: {
+  issue: CivicIssue;
+  linkToDetail?: boolean;
+  /** Department dashboard (G4): report ID, assigned date and last update —
+   * only rendered from real fields, never estimated. */
+  showWorkflowMeta?: boolean;
+}) {
   const content = (
     <article className="group flex h-full flex-col overflow-hidden rounded-2xl border border-border bg-white transition-all duration-300 hover:-translate-y-1 hover:border-civic-200 hover:shadow-[0_16px_40px_-22px_rgba(20,64,47,0.32)]">
       <div className="relative h-36 border-b border-border bg-surface-muted text-foreground-muted">
@@ -36,6 +47,11 @@ export function IssueCard({ issue, linkToDetail = true }: { issue: CivicIssue; l
         <div className="flex flex-wrap items-center gap-2">
           <PriorityBadge priority={issue.priority} />
           <StatusBadge status={issue.status} />
+          {showWorkflowMeta && (
+            <span className="rounded-full bg-surface-muted px-2 py-0.5 text-[10px] font-semibold text-foreground-muted">
+              #{issue.id.slice(0, 8)}
+            </span>
+          )}
         </div>
 
         <h3 className="mt-3 text-[15px] font-semibold leading-snug text-foreground">
@@ -43,6 +59,9 @@ export function IssueCard({ issue, linkToDetail = true }: { issue: CivicIssue; l
         </h3>
         <p className="mt-1 text-xs font-medium text-civic-700">
           {categoryLabels[issue.category]}
+          {issue.aiSeverity && (
+            <span className="font-normal text-foreground-muted"> · {issue.aiSeverity.toLowerCase()} severity</span>
+          )}
         </p>
 
         <dl className="mt-4 space-y-2 text-xs text-foreground-muted">
@@ -64,6 +83,20 @@ export function IssueCard({ issue, linkToDetail = true }: { issue: CivicIssue; l
             <dt className="sr-only">Reported</dt>
             <dd>Reported {formatDate(issue.reportedDate)}</dd>
           </div>
+          {showWorkflowMeta && issue.assignedAt && (
+            <div className="flex items-center gap-1.5">
+              <ClipboardCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <dt className="sr-only">Assigned</dt>
+              <dd>Assigned {formatDate(issue.assignedAt)}</dd>
+            </div>
+          )}
+          {showWorkflowMeta && issue.updatedAt && (
+            <div className="flex items-center gap-1.5">
+              <History className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <dt className="sr-only">Last updated</dt>
+              <dd>Updated {timeAgo(issue.updatedAt).toLowerCase()}</dd>
+            </div>
+          )}
         </dl>
 
         <div className="mt-auto flex items-center justify-between border-t border-border pt-4 text-xs">

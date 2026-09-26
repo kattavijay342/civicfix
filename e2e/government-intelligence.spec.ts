@@ -28,7 +28,9 @@ test.describe("Government dashboard (Phase 6E)", () => {
     await page.goto("/government");
 
     await expect(page.getByRole("heading", { name: "Area Overview" })).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole("heading", { name: "Needs Attention" })).toBeVisible();
+    // G5 replaced Phase 6E's "Needs Attention" panel with the Action
+    // Required command center (e2e/g5-action-required.spec.ts).
+    await expect(page.getByRole("heading", { name: "Action Required", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Issue Aging" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Category Trends" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Workload Distribution" })).toBeVisible();
@@ -44,13 +46,13 @@ test.describe("Government dashboard (Phase 6E)", () => {
     await expect(page.getByText(/Best Department|Worst Department|Top Performing Department/i)).toHaveCount(0);
   });
 
-  test("Today's Attention counts link to real filtered issue lists", async ({ page }) => {
+  test("Action Required queue tiles link to real filtered queues", async ({ page }) => {
     await signIn(page, TEST_GOVERNMENT.email, TEST_GOVERNMENT.password);
     await page.goto("/government");
-    await expect(page.getByText("Today's Attention")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("action-required")).toBeVisible({ timeout: 15_000 });
 
-    const reopenedLink = page.getByRole("link", { name: /Reopened issues/ });
-    await expect(reopenedLink).toHaveAttribute("href", "/government/issues?status=REOPENED");
+    const reopenedLink = page.getByTestId("action-required").getByRole("link", { name: /Reopened/ }).first();
+    await expect(reopenedLink).toHaveAttribute("href", "/government?queue=reopened#action-required");
   });
 
   test("the Department Trend 7/30/90 toggle switches views client-side with no page reload", async ({ page }) => {
@@ -93,7 +95,7 @@ test.describe("Department dashboard operational metrics (Phase 6E)", () => {
     await signIn(page, TEST_DEPARTMENT_INCHARGE.email, TEST_DEPARTMENT_INCHARGE.password);
     await page.goto("/department");
 
-    await expect(page.getByRole("heading", { name: "Assigned Reports" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: "My Assigned Issues" })).toBeVisible({ timeout: 15_000 });
     const assignedCount = await page.getByText("Assigned").locator("..").locator("p").first().textContent();
     if (assignedCount && Number(assignedCount) > 0) {
       await expect(page.getByRole("heading", { name: "Issue Aging" })).toBeVisible();

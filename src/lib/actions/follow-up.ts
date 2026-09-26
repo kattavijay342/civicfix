@@ -6,6 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { checkRateLimit, retryAfterMessage } from "@/lib/rate-limit";
 import { beginIdempotentAction } from "@/lib/idempotency";
 import { createNotification } from "@/lib/notifications/create";
+import { checkInchargeAccess } from "@/lib/data/incharge-access";
 
 export interface FollowUpFormState {
   error?: string;
@@ -76,7 +77,9 @@ export async function addFollowUp(
       .select("incharge_id")
       .eq("report_id", reportId)
       .maybeSingle();
-    if (assignment?.incharge_id) {
+    // Only an in-charge who still effectively owns the report is notified
+    // (G4 rule) — never a deactivated/moved/re-scoped one.
+    if (assignment?.incharge_id && (await checkInchargeAccess(admin, assignment.incharge_id, reportId)).ok) {
       await createNotification(admin, {
         recipientId: assignment.incharge_id,
         type: "follow_up_recorded",

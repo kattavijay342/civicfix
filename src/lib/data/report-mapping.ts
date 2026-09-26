@@ -1,9 +1,9 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { categoryFromDb, priorityFromDb, statusFromDb, categoryToDb, priorityToDb, statusToDb } from "@/lib/db-enums";
+import { categoryFromDb, priorityFromDb, severityFromDb, statusFromDb, categoryToDb, priorityToDb, statusToDb } from "@/lib/db-enums";
 import type { CivicIssue, IssueListFilters, PagedIssues } from "@/lib/types";
 
-export const ISSUE_LIST_SELECT = "id, title, category, status, priority, created_at, description";
+export const ISSUE_LIST_SELECT = "id, title, category, status, priority, severity, created_at, updated_at, description";
 
 /** Strips characters meaningful to PostgREST's `.or()` filter grammar
  * (`,()%*`) out of free-text search input before it's interpolated into a
@@ -66,7 +66,9 @@ export async function toPagedIssues(
     category: string;
     status: string;
     priority: string | null;
+    severity?: string | null;
     created_at: string;
+    updated_at?: string;
     description: string;
   }>,
   totalCount: number,
@@ -106,7 +108,9 @@ export async function mapReportsToIssues(
     category: string;
     status: string;
     priority: string | null;
+    severity?: string | null;
     created_at: string;
+    updated_at?: string;
     description: string;
   }>
 ): Promise<CivicIssue[]> {
@@ -116,7 +120,7 @@ export async function mapReportsToIssues(
   const [{ data: locations }, { data: assignments }, { data: departments }, { data: media }, { data: followUps }] =
     await Promise.all([
       readClient.from("report_locations").select("*").in("report_id", ids),
-      readClient.from("report_assignments").select("report_id, department_id").in("report_id", ids),
+      readClient.from("report_assignments").select("report_id, department_id, assigned_at").in("report_id", ids),
       readClient.from("departments").select("id, name"),
       readClient.from("report_media").select("report_id, id, file_path").eq("kind", "evidence").in("report_id", ids),
       readClient
@@ -131,6 +135,8 @@ export async function mapReportsToIssues(
   const departmentByReport = new Map(
     (assignments ?? []).map((a) => [a.report_id, departmentNameById.get(a.department_id) ?? "Unassigned"])
   );
+
+  const assignedAtByReport = new Map((assignments ?? []).map((a) => [a.report_id, a.assigned_at as string]));
 
   const followUpCountByReport = new Map<string, number>();
   const lastFollowUpByReport = new Map<string, string>();
@@ -178,8 +184,11 @@ export async function mapReportsToIssues(
           }
         : { displayName: "Location not recorded", source: "manual" },
       priority: r.priority ? priorityFromDb[r.priority] : "LOW",
+      aiSeverity: r.severity ? severityFromDb[r.severity] : undefined,
       status: statusFromDb[r.status],
       reportedDate: r.created_at,
+      updatedAt: r.updated_at,
+      assignedAt: assignedAtByReport.get(r.id),
       department: departmentByReport.get(r.id) ?? "Not yet routed",
       imageUrl: imageUrlByReport.get(r.id),
       // agingLabel() treats 0 as "Resolved", so an unresolved same-day
