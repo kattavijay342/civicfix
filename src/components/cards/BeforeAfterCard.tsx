@@ -1,5 +1,5 @@
 import Image from "next/image";
-import { ArrowRight, CheckCircle2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, RotateCcw } from "lucide-react";
 
 interface BeforeAfterCardProps {
   beforeSrc: string;
@@ -9,6 +9,9 @@ interface BeforeAfterCardProps {
   title: string;
   department: string;
   resolvedDate: string;
+  /** "previous" — a resolution the citizen rejected (the report was
+   * reopened): kept visible as evidence, never shown as the current one. */
+  variant?: "current" | "previous";
 }
 
 export function BeforeAfterCard({
@@ -19,9 +22,11 @@ export function BeforeAfterCard({
   title,
   department,
   resolvedDate,
+  variant = "current",
 }: BeforeAfterCardProps) {
+  const previous = variant === "previous";
   return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-[0_20px_50px_-28px_rgba(20,64,47,0.3)]">
+    <div className={previous ? "overflow-hidden rounded-2xl border border-border bg-white opacity-90" : "overflow-hidden rounded-2xl border border-border bg-white shadow-[0_20px_50px_-28px_rgba(20,64,47,0.3)]"}>
       <div className="grid grid-cols-2">
         <div className="relative aspect-[4/3]">
           <Image
@@ -52,13 +57,20 @@ export function BeforeAfterCard({
         <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
       </div>
       <div className="p-5">
-        <div className="flex items-center gap-1.5 text-civic-700">
-          <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-          <span className="text-xs font-semibold uppercase tracking-wide">Resolved</span>
-        </div>
+        {previous ? (
+          <div className="flex items-center gap-1.5 text-status-reopened" data-testid="previous-resolution-label">
+            <RotateCcw className="h-4 w-4" aria-hidden="true" />
+            <span className="text-xs font-semibold uppercase tracking-wide">Previous resolution — rejected by citizen</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-civic-700">
+            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+            <span className="text-xs font-semibold uppercase tracking-wide">Resolved</span>
+          </div>
+        )}
         <h3 className="mt-1.5 text-sm font-semibold text-foreground">{title}</h3>
         <p className="mt-1 text-xs text-foreground-muted">
-          {department} &middot; Resolved {resolvedDate}
+          {department} &middot; {previous ? "Previously resolved" : "Resolved"} {resolvedDate}
         </p>
       </div>
     </div>

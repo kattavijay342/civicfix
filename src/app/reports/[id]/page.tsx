@@ -32,6 +32,7 @@ import { ReminderRow } from "@/components/report/ReminderRow";
 import { DepartmentActionsPanel } from "@/components/report/DepartmentActionsPanel";
 import { routingStateFor, ROUTING_STATE_LABELS } from "@/lib/routing";
 import { ResolutionFeedbackForm } from "@/components/report/ResolutionFeedbackForm";
+import { isFeedbackForCurrentResolution } from "@/lib/resolution-verification";
 import { cn } from "@/lib/utils";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -128,14 +129,23 @@ async function RealReportDetail({ id }: { id: string }) {
   // must never compute to 0 — floor it at 1.
   const daysPending = report.status === "RESOLVED" ? 0 : Math.max(1, daysBetween(report.createdAt));
 
-  // A citizen's feedback is only "for" the resolution it was submitted
-  // after — a fresh reopen -> re-resolve cycle needs fresh feedback, so
-  // stale feedback from a previous cycle doesn't silently hide the form.
-  const feedbackIsForCurrentResolution =
-    report.resolutionFeedback && report.resolutionEvidence
-      ? new Date(report.resolutionFeedback.updatedAt) >= new Date(report.resolutionEvidence.resolvedAt)
-      : !!report.resolutionFeedback;
+  // A citizen's decision is only "for" the resolution it was submitted
+  // after — a fresh reopen -> re-resolve cycle needs a fresh decision, so
+  // a decision from a previous cycle doesn't silently hide the form.
+  const feedbackIsForCurrentResolution = isFeedbackForCurrentResolution(
+    report.resolutionFeedback?.updatedAt,
+    report.resolutionEvidence?.resolvedAt
+  );
   const showFeedbackForm = isOwner && report.status === "RESOLVED" && !feedbackIsForCurrentResolution;
+  // G7 — derived from the existing model, no separate status: verified =
+  // resolved + the citizen confirmed THIS resolution. Only a citizen reopen
+  // moves a report out of RESOLVED, so evidence on a non-resolved report is
+  // always a previous, rejected resolution.
+  const citizenVerified =
+    report.status === "RESOLVED" && feedbackIsForCurrentResolution && report.resolutionFeedback?.confirmed === true;
+  const resolutionIsPrevious = !!report.resolutionEvidence && report.status !== "RESOLVED";
+  const citizenRejected =
+    resolutionIsPrevious && feedbackIsForCurrentResolution && report.resolutionFeedback?.confirmed === false;
 
   const departmentAcknowledged = report.statusHistory.some((h) => h.newStatus === "ACKNOWLEDGED");
   const routingState = routingStateFor(report.assignment, report.status);
@@ -189,31 +199,34 @@ async function RealReportDetail({ id }: { id: string }) {
               Department acknowledged
             </span>
           )}
-          {report.resolutionEvidence && (
+          {report.resolutionEvidence && !resolutionIsPrevious && (
             <span className="inline-flex items-center gap-1 rounded-full bg-civic-50 px-2.5 py-1 font-medium text-civic-700">
               <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
               Resolution evidence submitted
             </span>
           )}
-          {report.resolutionEvidence && feedbackIsForCurrentResolution && report.resolutionFeedback && (
+          {citizenVerified && (
             <span
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-medium",
-                report.resolutionFeedback.confirmed ? "bg-civic-50 text-civic-700" : "bg-priority-critical-bg text-priority-critical"
-              )}
+              className="inline-flex items-center gap-1 rounded-full bg-civic-50 px-2.5 py-1 font-medium text-civic-700"
+              data-testid="citizen-verified-badge"
             >
-              {report.resolutionFeedback.confirmed ? (
-                <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-              ) : (
-                <XCircle className="h-3 w-3" aria-hidden="true" />
-              )}
-              {report.resolutionFeedback.confirmed ? "Citizen confirmed" : "Citizen reports still unresolved"}
+              <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+              Resolution verified by citizen
             </span>
           )}
-          {report.resolutionEvidence && !feedbackIsForCurrentResolution && (
+          {resolutionIsPrevious && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-priority-critical-bg px-2.5 py-1 font-medium text-priority-critical"
+              data-testid="citizen-rejected-badge"
+            >
+              <XCircle className="h-3 w-3" aria-hidden="true" />
+              Previous resolution rejected by citizen
+            </span>
+          )}
+          {report.status === "RESOLVED" && report.resolutionEvidence && !feedbackIsForCurrentResolution && (
             <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 font-medium text-foreground-muted">
               <Clock className="h-3 w-3" aria-hidden="true" />
-              Citizen confirmation pending
+              Citizen verification pending
             </span>
           )}
         </div>
@@ -225,7 +238,10 @@ async function RealReportDetail({ id }: { id: string }) {
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-foreground">{buildCitizenSummary(summaryReport)}</p>
           <p className="mt-2 border-t border-civic-100 pt-2 text-xs text-foreground-muted">
-            <span className="font-medium text-foreground">Next:</span> {STATUS_EXPLANATIONS[report.status].nextStep.en}
+            <span className="font-medium text-foreground">Next:</span>{" "}
+            {citizenVerified
+              ? "The reporting citizen verified this resolution — no further action is needed."
+              : STATUS_EXPLANATIONS[report.status].nextStep.en}
           </p>
         </div>
 
@@ -419,6 +435,7 @@ async function RealReportDetail({ id }: { id: string }) {
                   title={report.title}
                   department={report.assignment?.departmentName ?? "—"}
                   resolvedDate={formatDate(report.resolutionEvidence.resolvedAt)}
+                  variant={resolutionIsPrevious ? "previous" : "current"}
                 />
               ) : (
                 report.resolutionEvidence && (
@@ -429,12 +446,38 @@ async function RealReportDetail({ id }: { id: string }) {
               )}
             {report.resolutionEvidence && (
               <p className="-mt-3 rounded-2xl border border-border bg-white px-6 py-4 text-sm text-foreground-muted">
-                <span className="font-semibold text-foreground">Resolution notes:</span>{" "}
+                <span className="font-semibold text-foreground">
+                  {resolutionIsPrevious ? "Previous resolution notes:" : "Resolution notes:"}
+                </span>{" "}
                 {report.resolutionEvidence.notes}
               </p>
             )}
 
-            {showFeedbackForm && <ResolutionFeedbackForm reportId={report.id} />}
+            {showFeedbackForm && (
+              <ResolutionFeedbackForm reportId={report.id} resolvedAt={report.resolutionEvidence?.resolvedAt ?? null} />
+            )}
+            {isOwner && citizenVerified && (
+              <div
+                role="status"
+                data-testid="resolution-verified-panel"
+                className="flex items-center gap-2 rounded-2xl border border-civic-200 bg-civic-50 p-6 text-sm font-medium text-civic-800"
+              >
+                <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                You verified this resolution on {formatDate(report.resolutionFeedback!.updatedAt)}.
+              </div>
+            )}
+            {isOwner && citizenRejected && (
+              <div
+                role="status"
+                data-testid="resolution-rejected-panel"
+                className="rounded-2xl border border-status-reopened/30 bg-status-reopened-bg p-6 text-sm text-status-reopened"
+              >
+                <p className="font-semibold">You rejected the previous resolution — the issue was reopened for the department.</p>
+                {report.resolutionFeedback?.comment && (
+                  <p className="mt-1 text-xs">Your reason: &ldquo;{report.resolutionFeedback.comment}&rdquo;</p>
+                )}
+              </div>
+            )}
 
             {report.duplicateOf && (
               <DuplicateIssueCard

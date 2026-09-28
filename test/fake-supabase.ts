@@ -7,7 +7,7 @@
  * scripts/verify-*.mjs against a real Supabase project).
  *
  * Supports exactly the query-builder surface CivicFix's server code
- * actually calls: eq/neq/gte/lte/in/limit/order, select, insert, update,
+ * actually calls: eq/neq/gte/lt/lte/in/limit/order, select, insert, update,
  * delete, maybeSingle, single, and plain awaiting the builder itself.
  */
 
@@ -72,6 +72,10 @@ class FakeQuery {
   }
   gte(column: string, value: unknown) {
     this.predicates.push((r) => (r[column] as string | number) >= (value as string | number));
+    return this;
+  }
+  lt(column: string, value: unknown) {
+    this.predicates.push((r) => (r[column] as string | number) < (value as string | number));
     return this;
   }
   lte(column: string, value: unknown) {

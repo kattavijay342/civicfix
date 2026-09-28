@@ -397,3 +397,53 @@ describe("input validation", () => {
     );
   });
 });
+
+describe("G7. resolution — only the current effective in-charge (or the existing admin override)", () => {
+  beforeEach(() => {
+    seed("in_progress");
+  });
+
+  it("the current effective in-charge resolves: evidence, resolver, history, one citizen notification", async () => {
+    expect(await submitResolution(REPORT, {}, resolveForm())).toEqual({ success: true });
+    expect(reportStatus()).toBe("resolved");
+    expect(db.resolution_evidence).toEqual([
+      expect.objectContaining({ report_id: REPORT, resolved_by: "incharge-a", resolution_notes: "Pothole filled and compacted." }),
+    ]);
+    expect(db.resolution_evidence[0].after_media_id).toBe(afterMedia()[0].id);
+    expect(db.resolution_evidence[0].before_media_id).toBe("media-before");
+    expect(db.status_history).toEqual([
+      expect.objectContaining({ old_status: "in_progress", new_status: "resolved", changed_by: "incharge-a" }),
+    ]);
+    expect(db.notifications).toEqual([
+      expect.objectContaining({ recipient_id: "citizen-1", type: "report_resolved", related_report_id: REPORT }),
+    ]);
+  });
+
+  it("the existing G4 admin override can still resolve", async () => {
+    as("admin-1");
+    expect(await submitResolution(REPORT, {}, resolveForm())).toEqual({ success: true });
+    expect(db.resolution_evidence[0].resolved_by).toBe("admin-1");
+  });
+
+  const stale: Array<[string, () => void, RegExp]> = [
+    ["deactivated", () => void (db.department_incharges[0].is_active = false), /inactive/],
+    ["moved to another department", () => void (db.profiles[0].department_id = "dept-water"), /no longer assigned/],
+    ["re-scoped out of the jurisdiction", () => void Object.assign(db.department_incharges[0], TENALI), /outside your current jurisdiction/],
+    ["demoted to citizen", () => void (db.profiles[0].role = "citizen"), /Only the assigned department in-charge/],
+    [
+      "replaced by another in-charge",
+      () => void (db.report_assignments[0].incharge_id = "incharge-b"),
+      /isn't assigned to you/,
+    ],
+  ];
+  for (const [name, mutate, message] of stale) {
+    it(`a ${name} in-charge cannot resolve`, async () => {
+      mutate();
+      expect((await submitResolution(REPORT, {}, resolveForm())).error).toMatch(message);
+      expect(reportStatus()).toBe("in_progress");
+      expect(db.resolution_evidence).toHaveLength(0);
+      expect(afterMedia()).toHaveLength(0);
+      expect(db.notifications).toHaveLength(0);
+    });
+  }
+});
