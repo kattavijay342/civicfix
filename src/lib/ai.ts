@@ -99,12 +99,13 @@ export const aiAnalysisExtendedSchema = analysisSchema.pick({
 
 export type AIAnalysisExtended = z.infer<typeof aiAnalysisExtendedSchema>;
 
-/** Stable (GA) Gemini Flash model — listed as Stable with no shutdown date
- * on Google's models/deprecations pages as of 2026-10. A 503 "high demand"
- * from it is temporary capacity pressure, handled by GEMINI_RETRY below.
+/** Google's current recommended stable Gemini Flash model (listed as Stable
+ * with no shutdown date on Google's models/deprecations pages as of
+ * 2026-10). A 503 "high demand" from it is temporary capacity pressure on
+ * Google's side, handled by GEMINI_RETRY below — never faked as success.
  * GEMINI_MODEL (server-only env) can override it without a code change;
  * anything that isn't a plain Gemini model id is ignored. */
-const DEFAULT_MODEL = "gemini-3.6-flash";
+const DEFAULT_MODEL = "gemini-3.8-flash";
 
 export function resolveGeminiModel(override = process.env.GEMINI_MODEL): string {
   const value = override?.trim();

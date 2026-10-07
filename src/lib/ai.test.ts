@@ -381,17 +381,30 @@ describe("Gemini transient-error handling (503 high demand / 429)", () => {
 });
 
 describe("resolveGeminiModel", () => {
-  it("defaults to the stable gemini-3.6-flash", () => {
-    expect(resolveGeminiModel(undefined)).toBe("gemini-3.6-flash");
-    expect(resolveGeminiModel("")).toBe("gemini-3.6-flash");
+  it("defaults to the stable gemini-3.8-flash", () => {
+    expect(resolveGeminiModel(undefined)).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel("")).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel("   ")).toBe("gemini-3.8-flash");
   });
-  it("accepts a plain Gemini model id override", () => {
-    expect(resolveGeminiModel("gemini-3.8-flash")).toBe("gemini-3.8-flash");
+  it("accepts a plain Gemini model id override (GEMINI_MODEL)", () => {
+    expect(resolveGeminiModel("gemini-3.6-flash")).toBe("gemini-3.6-flash");
     expect(resolveGeminiModel(" gemini-3.5-flash-lite ")).toBe("gemini-3.5-flash-lite");
+  });
+  it("reads the override from process.env.GEMINI_MODEL by default", () => {
+    const previous = process.env.GEMINI_MODEL;
+    try {
+      process.env.GEMINI_MODEL = "gemini-3.7-flash";
+      expect(resolveGeminiModel()).toBe("gemini-3.7-flash");
+      delete process.env.GEMINI_MODEL;
+      expect(resolveGeminiModel()).toBe("gemini-3.8-flash");
+    } finally {
+      if (previous === undefined) delete process.env.GEMINI_MODEL;
+      else process.env.GEMINI_MODEL = previous;
+    }
   });
   it("ignores anything that isn't a plain Gemini model id", () => {
     for (const bad of ["gpt-4o", "gemini-3.6-flash?key=x", "models/gemini-3.6-flash", "gemini 3.6", "../gemini"]) {
-      expect(resolveGeminiModel(bad)).toBe("gemini-3.6-flash");
+      expect(resolveGeminiModel(bad)).toBe("gemini-3.8-flash");
     }
   });
   it("records the model actually used on the analysis result", async () => {
