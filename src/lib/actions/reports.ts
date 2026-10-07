@@ -3,7 +3,7 @@
 import { randomUUID } from "crypto";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { analyzeReport, AIUnavailableError } from "@/lib/ai";
+import { analyzeReport, analyzeReportWithinBudget } from "@/lib/ai";
 import { findPossibleDuplicate } from "@/lib/duplicate-detection";
 import { evaluateIncidentForReport } from "@/lib/incident-linking";
 import { loadConfiguredDepartments, routeReport, type RouteReportResult } from "@/lib/actions/routing";
@@ -31,26 +31,60 @@ export type CreateReportState =
 const DB_FAILURE_MESSAGE = "Unable to save the report. Please try again.";
 const UPLOAD_FAILURE_MESSAGE = "Evidence upload failed. Please try again.";
 
-async function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+/** One AI analysis inside a hard time budget — transient HTTP errors are
+ * re-sent only by the SDK, network-level failures get one app retry, and
+ * permanent errors none (see analyzeReportWithinBudget in src/lib/ai.ts for
+ * the exact call/time limits). */
+const analyzeWithRetry = analyzeReportWithinBudget;
 
-/** Up to 2 retries with short backoff for a transient AI failure. Never
- * retries validation errors — those come back from Gemini as a rejected
- * schema/JSON, which we treat as non-retryable here (see AIUnavailableError
- * usage in src/lib/ai.ts). */
-async function analyzeWithRetry(input: Parameters<typeof analyzeReport>[0]) {
-  const delays = [500, 1500];
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= delays.length; attempt++) {
-    try {
-      return await analyzeReport(input);
-    } catch (err) {
-      lastError = err;
-      if (attempt < delays.length) await sleep(delays[attempt]);
-    }
+/** Retry claims are scoped to a window longer than the page's maxDuration
+ * (60s), so a claim left behind by a request the platform killed can never
+ * block that report's retry for more than this window (idempotency_keys
+ * rows are not swept automatically). */
+const RETRY_CLAIM_WINDOW_MS = 120_000;
+
+const AI_RETRY_IN_PROGRESS_MESSAGE = "AI analysis is already being retried for this report. Please wait a moment.";
+const AI_UNAVAILABLE_MESSAGE = "AI analysis is temporarily unavailable.";
+
+/** Postgres unique-violation code (ai_analyses.report_id is UNIQUE). */
+const UNIQUE_VIOLATION = "23505";
+
+/**
+ * Persists a completed analysis for a report that is still `reported`:
+ * inserts the ai_analyses row, then compare-and-sets the report to
+ * `ai_analyzed`. Nothing else (history, notifications, routing) may run
+ * unless this returns "persisted", so a failed write never leaves a report
+ * marked analyzed/routed without its analysis:
+ *   - insert fails                 -> "failed"   (report stays `reported`, retryable)
+ *   - insert hits UNIQUE(report_id) -> "already"  (another request persisted it first)
+ *   - status update fails / no row still `reported` -> the just-inserted
+ *     analysis row is deleted again, so the report stays retryable -> "failed"
+ */
+async function persistAnalysis(
+  admin: ReturnType<typeof createAdminClient>,
+  reportId: string,
+  analysis: Awaited<ReturnType<typeof analyzeReport>>
+): Promise<"persisted" | "already" | "failed"> {
+  const { error: insertError } = await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
+  if (insertError) {
+    if (insertError.code === UNIQUE_VIOLATION) return "already";
+    console.error("ai_analyses insert failed; report stays retryable", reportId, insertError);
+    return "failed";
   }
-  throw lastError instanceof Error ? lastError : new AIUnavailableError("AI analysis failed.");
+
+  const { data: updated, error: statusError } = await admin
+    .from("reports")
+    .update({ severity: analysis.severity, priority: analysis.priority, status: "ai_analyzed" })
+    .eq("id", reportId)
+    .eq("status", "reported")
+    .select("id");
+  if (statusError || !updated || updated.length === 0) {
+    console.error("Status update after AI analysis failed; reverting the analysis row", reportId, statusError);
+    const { error: revertError } = await admin.from("ai_analyses").delete().eq("report_id", reportId);
+    if (revertError) console.error("Reverting the analysis row failed", reportId, revertError);
+    return "failed";
+  }
+  return "persisted";
 }
 
 /** Shared shape for the `ai_analyses` insert used by both the initial
@@ -433,23 +467,29 @@ async function performCreateReport(
       imageMimeType,
       departmentNames: departments.map((d) => d.name),
     });
+
+    // Only a persisted analysis counts: if the row or the status update
+    // can't be written, this is treated exactly like an AI failure — the
+    // report stays `reported` (retryable), with no history, notification or
+    // routing. (A brand-new report can't hit "already".)
+    if ((await persistAnalysis(admin, reportId, analysis)) !== "persisted") {
+      throw new Error("AI analysis could not be saved");
+    }
     completedAnalysis = analysis;
-
-    await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
-
-    await admin
-      .from("reports")
-      .update({
-        severity: analysis.severity,
-        priority: analysis.priority,
-        status: "ai_analyzed",
-      })
-      .eq("id", reportId);
-    await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete");
-    await notifyAiAnalysisComplete(admin, { reportId, reporterId: user.id, title, analysis, location });
   } catch (err) {
     aiFailed = true;
     console.error("AI analysis failed for report", reportId, err);
+  }
+
+  if (completedAnalysis) {
+    // Best-effort side effects of an analysis that IS saved: a failure here
+    // must not relabel a successfully analyzed report as an AI failure.
+    try {
+      await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete");
+      await notifyAiAnalysisComplete(admin, { reportId, reporterId: user.id, title, analysis: completedAnalysis, location });
+    } catch (err) {
+      console.error("Post-analysis history/notification failed (non-fatal)", reportId, err);
+    }
   }
 
   // No AI analysis -> no routing: the report stays "reported" (Routing
@@ -556,21 +596,45 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
     source: location.location_source,
   };
 
+  // Claim this report's retry BEFORE calling Gemini, with the same
+  // idempotency mechanism createReport uses: a double click or a second tab
+  // gets "in progress" (or the finished result) and never makes its own
+  // Gemini call. The key is per report, per RETRY_CLAIM_WINDOW_MS window.
+  const claimKey = `${reportId}:${Math.floor(Date.now() / RETRY_CLAIM_WINDOW_MS)}`;
+  const claim = await beginIdempotentAction<{ error?: string }>(admin, user.id, "retry_ai_analysis", claimKey);
+  if (claim.kind === "replay") return claim.result;
+  if (claim.kind === "in_progress") return { error: AI_RETRY_IN_PROGRESS_MESSAGE };
+
+  let analysis: Awaited<ReturnType<typeof analyzeReport>>;
+  let departments: ConfiguredDepartment[];
   try {
-    const departments = await loadConfiguredDepartments(admin);
-    const analysis = await analyzeWithRetry({
+    departments = await loadConfiguredDepartments(admin);
+    analysis = await analyzeWithRetry({
       description: report.description,
       category,
       location: retryLocation,
       departmentNames: departments.map((d) => d.name),
     });
+  } catch {
+    await claim.release(); // nothing was written — a later retry may try again
+    return { error: AI_UNAVAILABLE_MESSAGE };
+  }
 
-    await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
+  const persisted = await persistAnalysis(admin, reportId, analysis);
+  if (persisted === "already") {
+    // Database backstop: another request (e.g. one that straddled a claim
+    // window) saved this report's analysis first and owns its history,
+    // notifications and routing — this one does none of them.
+    await claim.commit({});
+    return {};
+  }
+  if (persisted === "failed") {
+    await claim.release(); // report stays `reported` and retryable
+    return { error: AI_UNAVAILABLE_MESSAGE };
+  }
 
-    await admin
-      .from("reports")
-      .update({ severity: analysis.severity, priority: analysis.priority, status: "ai_analyzed" })
-      .eq("id", reportId);
+  // Only the request that persisted the analysis gets here.
+  try {
     await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete (retry)");
     await notifyAiAnalysisComplete(admin, {
       reportId,
@@ -579,18 +643,19 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
       analysis,
       location: retryLocation,
     });
-
-    await routeAnalyzedReport(admin, {
-      reportId,
-      title: report.title,
-      citizenCategory: category,
-      analysis,
-      location: retryLocation,
-      departments,
-    });
-
-    return {};
-  } catch {
-    return { error: "AI analysis is temporarily unavailable." };
+  } catch (err) {
+    console.error("Post-analysis history/notification failed (non-fatal)", reportId, err);
   }
+
+  await routeAnalyzedReport(admin, {
+    reportId,
+    title: report.title,
+    citizenCategory: category,
+    analysis,
+    location: retryLocation,
+    departments,
+  });
+
+  await claim.commit({});
+  return {};
 }

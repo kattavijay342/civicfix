@@ -1,16 +1,40 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const generateContentMock = vi.fn();
+const constructorOptions: unknown[] = [];
 
 vi.mock("@google/genai", () => ({
   GoogleGenAI: class {
     models = { generateContent: generateContentMock };
+    constructor(options: unknown) {
+      constructorOptions.push(options);
+    }
+  },
+  // Mirrors the SDK's ApiError: Gemini answered with an HTTP error status.
+  ApiError: class extends Error {
+    status: number;
+    constructor({ message, status }: { message: string; status: number }) {
+      super(message);
+      this.status = status;
+    }
   },
   Type: { OBJECT: "OBJECT", STRING: "STRING", NUMBER: "NUMBER", ARRAY: "ARRAY", BOOLEAN: "BOOLEAN" },
 }));
 
 // Imported after the mock so analyzeReport picks up the mocked GoogleGenAI.
-const { analyzeReport, AIUnavailableError } = await import("@/lib/ai");
+const {
+  analyzeReport,
+  analyzeReportWithinBudget,
+  AIUnavailableError,
+  GEMINI_RETRY,
+  GEMINI_ATTEMPT_TIMEOUT_MS,
+  AI_TOTAL_BUDGET_MS,
+  NETWORK_RETRY_DELAY_MS,
+  TRANSIENT_GEMINI_STATUSES,
+  isNetworkLevelAIFailure,
+  resolveGeminiModel,
+} = await import("@/lib/ai");
+const { ApiError } = await import("@google/genai");
 
 const validInput = {
   description: "Large pothole growing after rain",
@@ -287,5 +311,196 @@ describe("analyzeReport — Phase G3 department recommendation", () => {
     });
     const result = await analyzeReport({ ...validInput, departmentNames });
     expect(result.recommended_department).toBe("Roads & Buildings Department");
+  });
+});
+
+describe("Gemini transient-error handling (503 high demand / 429)", () => {
+  const apiError = (status: number) => new ApiError({ message: `{"error":{"code":${status}}}`, status });
+
+  it("enables the SDK's own retry with exponential backoff, only for 429/5xx, at most 3 calls", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockResolvedValue({ text: JSON.stringify(validAiResponse) });
+    constructorOptions.length = 0;
+    await analyzeReport(validInput);
+    expect(constructorOptions.at(-1)).toMatchObject({ httpOptions: { retryOptions: GEMINI_RETRY } });
+    expect(GEMINI_RETRY.attempts).toBe(3);
+    expect(GEMINI_RETRY.initialDelay).toBe(1);
+    expect(GEMINI_RETRY.jitter).toBeGreaterThan(0);
+    expect(GEMINI_RETRY.httpStatusCodes).toEqual([429, 500, 502, 503, 504]);
+    expect(GEMINI_RETRY.httpStatusCodes).not.toContain(400);
+    expect(GEMINI_RETRY.httpStatusCodes).not.toContain(403);
+  });
+
+  it("a 503 that survives the SDK's retries becomes a transient AIUnavailableError with status 503 — not retried again by the app", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockRejectedValue(apiError(503));
+    const err = await analyzeReport(validInput).catch((e) => e);
+    expect(err).toBeInstanceOf(AIUnavailableError);
+    expect(err.status).toBe(503);
+    expect(err.transient).toBe(true);
+    expect(isNetworkLevelAIFailure(err)).toBe(false);
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("429 is transient; 400/403/404 are permanent", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    for (const [status, transient] of [[429, true], [400, false], [403, false], [404, false]] as const) {
+      generateContentMock.mockRejectedValueOnce(apiError(status));
+      const err = await analyzeReport(validInput).catch((e) => e);
+      expect(err.status).toBe(status);
+      expect(err.transient).toBe(transient);
+      expect(TRANSIENT_GEMINI_STATUSES.includes(status)).toBe(transient);
+    }
+  });
+
+  it("a failure with no HTTP response (network) is transient with no status — the one case the app retries once", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockRejectedValue(new TypeError("fetch failed"));
+    const err = await analyzeReport(validInput).catch((e) => e);
+    expect(err.transient).toBe(true);
+    expect(err.status).toBeUndefined();
+    expect(isNetworkLevelAIFailure(err)).toBe(true);
+  });
+
+  it("missing key and invalid model output are never transient (never retried)", async () => {
+    const noKey = await analyzeReport(validInput).catch((e) => e);
+    expect(noKey.transient).toBe(false);
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockResolvedValue({ text: "not json" });
+    const badOutput = await analyzeReport(validInput).catch((e) => e);
+    expect(badOutput.transient).toBe(false);
+    expect(isNetworkLevelAIFailure(badOutput)).toBe(false);
+  });
+
+  it("never puts the API key in the error", async () => {
+    process.env.GEMINI_API_KEY = "test-key-SECRET-123";
+    generateContentMock.mockRejectedValue(apiError(503));
+    const err = await analyzeReport(validInput).catch((e) => e);
+    expect(String(err.message)).not.toContain("SECRET-123");
+  });
+});
+
+describe("resolveGeminiModel", () => {
+  it("defaults to the stable gemini-3.6-flash", () => {
+    expect(resolveGeminiModel(undefined)).toBe("gemini-3.6-flash");
+    expect(resolveGeminiModel("")).toBe("gemini-3.6-flash");
+  });
+  it("accepts a plain Gemini model id override", () => {
+    expect(resolveGeminiModel("gemini-3.8-flash")).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel(" gemini-3.5-flash-lite ")).toBe("gemini-3.5-flash-lite");
+  });
+  it("ignores anything that isn't a plain Gemini model id", () => {
+    for (const bad of ["gpt-4o", "gemini-3.6-flash?key=x", "models/gemini-3.6-flash", "gemini 3.6", "../gemini"]) {
+      expect(resolveGeminiModel(bad)).toBe("gemini-3.6-flash");
+    }
+  });
+  it("records the model actually used on the analysis result", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockResolvedValue({ text: JSON.stringify(validAiResponse) });
+    const result = await analyzeReport(validInput);
+    expect(result.model).toBe(resolveGeminiModel());
+    expect(generateContentMock.mock.calls.at(-1)?.[0]).toMatchObject({ model: resolveGeminiModel() });
+  });
+});
+
+describe("timeouts and the per-report time budget", () => {
+  const noSleep = vi.fn(async () => {});
+  const ok = () => ({ text: JSON.stringify(validAiResponse) });
+
+  beforeEach(() => {
+    process.env.GEMINI_API_KEY = "test-key";
+    noSleep.mockClear();
+  });
+
+  it("caps every SDK attempt with a 20s HTTP timeout, alongside the transient-only retry", async () => {
+    generateContentMock.mockResolvedValue(ok());
+    constructorOptions.length = 0;
+    await analyzeReport(validInput);
+    expect(GEMINI_ATTEMPT_TIMEOUT_MS).toBe(20_000);
+    expect(constructorOptions.at(-1)).toMatchObject({ httpOptions: { retryOptions: GEMINI_RETRY, timeout: 20_000 } });
+  });
+
+  it("passes the overall budget signal to Gemini so the SDK stops retrying when it fires", async () => {
+    generateContentMock.mockResolvedValue(ok());
+    const signal = new AbortController().signal;
+    await analyzeReport(validInput, { signal });
+    expect(generateContentMock.mock.calls.at(-1)?.[0].config.abortSignal).toBe(signal);
+  });
+
+  it("normal success: exactly one Gemini request", async () => {
+    generateContentMock.mockResolvedValue(ok());
+    await analyzeReportWithinBudget(validInput, { sleep: noSleep });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it("permanent error (invalid output / 400): one request, no app retry", async () => {
+    generateContentMock.mockResolvedValueOnce({ text: "not json" });
+    await expect(analyzeReportWithinBudget(validInput, { sleep: noSleep })).rejects.toBeInstanceOf(AIUnavailableError);
+    generateContentMock.mockRejectedValueOnce(new ApiError({ message: "bad request", status: 400 }));
+    await expect(analyzeReportWithinBudget(validInput, { sleep: noSleep })).rejects.toMatchObject({ status: 400 });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it("503/429 surviving the SDK's own retries is NOT retried again by the app (no double retry layer)", async () => {
+    for (const status of [503, 429]) {
+      generateContentMock.mockReset();
+      generateContentMock.mockRejectedValue(new ApiError({ message: "high demand", status }));
+      await expect(analyzeReportWithinBudget(validInput, { sleep: noSleep })).rejects.toMatchObject({ status, transient: true });
+      // One SDK call from the app's point of view (the SDK's ≤3 internal attempts happen inside it).
+      expect(generateContentMock).toHaveBeenCalledTimes(1);
+    }
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it("network-level failure (fetch failed): ONE app retry after 1s, then success", async () => {
+    generateContentMock.mockRejectedValueOnce(new TypeError("fetch failed")).mockResolvedValueOnce(ok());
+    const result = await analyzeReportWithinBudget(validInput, { sleep: noSleep });
+    expect(result.category).toBe("road");
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(noSleep).toHaveBeenCalledWith(NETWORK_RETRY_DELAY_MS);
+    // Both attempts share the same overall budget signal.
+    const [first, second] = generateContentMock.mock.calls.map((c) => c[0].config.abortSignal);
+    expect(first).toBeInstanceOf(AbortSignal);
+    expect(second).toBe(first);
+  });
+
+  it("network-level failure twice: still only two app-level requests (never more)", async () => {
+    generateContentMock.mockRejectedValue(new TypeError("fetch failed"));
+    await expect(analyzeReportWithinBudget(validInput, { sleep: noSleep })).rejects.toMatchObject({ networkLevel: true });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips the network retry when a full attempt no longer fits in the budget", async () => {
+    let t = 0;
+    const now = () => t;
+    generateContentMock.mockImplementation(async () => {
+      t += AI_TOTAL_BUDGET_MS - GEMINI_ATTEMPT_TIMEOUT_MS; // the first attempt used most of the budget
+      throw new TypeError("fetch failed");
+    });
+    await expect(analyzeReportWithinBudget(validInput, { sleep: noSleep, now })).rejects.toMatchObject({ networkLevel: true });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it("an attempt timeout / budget abort is transient but never retried by the app", async () => {
+    generateContentMock.mockRejectedValue(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    const err = await analyzeReportWithinBudget(validInput, { sleep: noSleep }).catch((e) => e);
+    expect(err).toBeInstanceOf(AIUnavailableError);
+    expect(err.transient).toBe(true);
+    expect(isNetworkLevelAIFailure(err)).toBe(false);
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("budget arithmetic: worst case stays well inside the 60s maxDuration", () => {
+    expect(AI_TOTAL_BUDGET_MS).toBe(30_000);
+    // The app retry only starts if a full attempt + its wait still fits.
+    expect(NETWORK_RETRY_DELAY_MS + GEMINI_ATTEMPT_TIMEOUT_MS).toBeLessThanOrEqual(AI_TOTAL_BUDGET_MS);
+    // AI budget + incident-confirmation cap (10s) leaves ≥20s of the 60s for upload/DB/routing.
+    expect(60_000 - AI_TOTAL_BUDGET_MS - 10_000).toBeGreaterThanOrEqual(20_000);
+    // Absolute call ceiling: a network-level failure is 1 attempt (the SDK
+    // doesn't re-send it), then the one app retry may use all SDK attempts.
+    expect(1 + GEMINI_RETRY.attempts!).toBe(4);
   });
 });

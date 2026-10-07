@@ -35,6 +35,10 @@ import { ResolutionFeedbackForm } from "@/components/report/ResolutionFeedbackFo
 import { isFeedbackForCurrentResolution } from "@/lib/resolution-verification";
 import { cn } from "@/lib/utils";
 
+// retryAiAnalysis (via RetryAnalysisButton) runs the Gemini analysis inside
+// a 30s budget (AI_TOTAL_BUDGET_MS, src/lib/ai.ts) — 60s covers it.
+export const maxDuration = 60;
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function formatDate(iso: string) {

@@ -10,6 +10,10 @@ import { categoryLabels } from "@/lib/categories";
 import { getReportDetail } from "@/lib/data/report-detail";
 import { RetryAnalysisButton } from "./RetryAnalysisButton";
 
+// retryAiAnalysis (via RetryAnalysisButton) runs the Gemini analysis inside
+// a 30s budget (AI_TOTAL_BUDGET_MS, src/lib/ai.ts) — 60s covers it.
+export const maxDuration = 60;
+
 export default async function AnalysisPage({
   searchParams,
 }: {

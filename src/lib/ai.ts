@@ -1,5 +1,5 @@
 import "server-only";
-import { GoogleGenAI, Type } from "@google/genai";
+import { ApiError, GoogleGenAI, Type, type HttpRetryOptions } from "@google/genai";
 import { z } from "zod";
 import type { CivicLocation, ProblemCategory } from "./types";
 import { categoryLabels } from "./categories";
@@ -9,8 +9,27 @@ import { locationOneLine } from "./location-format";
 /** Thrown for any AI failure — missing key, network/API error, or a
  * response that fails schema/enum validation. Callers show the fixed
  * message from Step 20 ("AI analysis is temporarily unavailable.") and a
- * manual retry action, never a raw stack trace. */
-export class AIUnavailableError extends Error {}
+ * manual retry action, never a raw stack trace.
+ *
+ * `status` is the Gemini HTTP status when the API answered with an error
+ * (e.g. 503 "model is experiencing high demand"); `transient` marks failures
+ * worth retrying later (429/5xx, or no HTTP response at all) as opposed to
+ * permanent ones (missing key, 4xx request errors, invalid model output). */
+export class AIUnavailableError extends Error {
+  readonly status?: number;
+  readonly transient: boolean;
+  /** No HTTP response at all (Node's `TypeError: fetch failed`) — the one
+   * transient failure the SDK's retry does NOT re-send (its p-retry treats a
+   * TypeError as permanent), so the only one the app retries itself. */
+  readonly networkLevel: boolean;
+  constructor(message: string, options: { status?: number; transient?: boolean; networkLevel?: boolean } = {}) {
+    super(message);
+    this.name = "AIUnavailableError";
+    this.status = options.status;
+    this.transient = options.transient ?? false;
+    this.networkLevel = options.networkLevel ?? false;
+  }
+}
 
 /**
  * Phase 6A — structured image evidence. Only meaningful when a photo was
@@ -80,7 +99,66 @@ export const aiAnalysisExtendedSchema = analysisSchema.pick({
 
 export type AIAnalysisExtended = z.infer<typeof aiAnalysisExtendedSchema>;
 
-const MODEL = "gemini-3.6-flash";
+/** Stable (GA) Gemini Flash model — listed as Stable with no shutdown date
+ * on Google's models/deprecations pages as of 2026-10. A 503 "high demand"
+ * from it is temporary capacity pressure, handled by GEMINI_RETRY below.
+ * GEMINI_MODEL (server-only env) can override it without a code change;
+ * anything that isn't a plain Gemini model id is ignored. */
+const DEFAULT_MODEL = "gemini-3.6-flash";
+
+export function resolveGeminiModel(override = process.env.GEMINI_MODEL): string {
+  const value = override?.trim();
+  return value && /^gemini-[a-z0-9.-]{1,60}$/.test(value) ? value : DEFAULT_MODEL;
+}
+
+/** HTTP statuses Google documents as retryable for the Gemini API
+ * (429 RESOURCE_EXHAUSTED, 503 UNAVAILABLE) plus the other transient 5xx. */
+export const TRANSIENT_GEMINI_STATUSES = [429, 500, 502, 503, 504];
+
+/** The SDK's own retry (off unless configured): re-sends the SAME request
+ * only for the transient statuses above, with exponential backoff + jitter
+ * as Google recommends — 3 attempts in total (≈1s, then ≈2s, each capped at
+ * 4s), so at most 3 Gemini calls per analysis and a bounded wait on the
+ * report-submission path. Validation/permanent errors are never retried. */
+export const GEMINI_RETRY: HttpRetryOptions = {
+  attempts: 3,
+  initialDelay: 1,
+  maxDelay: 4,
+  expBase: 2,
+  jitter: 1,
+  httpStatusCodes: TRANSIENT_GEMINI_STATUSES,
+};
+
+/** Per-attempt HTTP timeout (ms) for one Gemini request. The SDK arms a
+ * fresh timer for every attempt (and also sends it to Google as the
+ * server-side deadline), so a hung request can't eat the whole function. */
+export const GEMINI_ATTEMPT_TIMEOUT_MS = 20_000;
+
+/** Maps a thrown Gemini/SDK error to AIUnavailableError, keeping the HTTP
+ * status. Never includes the API key (it isn't in any of these errors).
+ *   - ApiError: Gemini answered with an HTTP error — transient for 429/5xx
+ *     (already re-sent by the SDK's GEMINI_RETRY), permanent otherwise.
+ *   - TypeError (`fetch failed`): no HTTP response at all — transient and
+ *     network-level; the SDK's p-retry treats a TypeError as permanent, so
+ *     this is the only case the app retries itself (see analyzeReportWithinBudget).
+ *   - anything else (an attempt timeout / overall-budget abort, or another
+ *     error the SDK's p-retry already re-sent): transient, NOT network-level,
+ *     so it is never retried a second time by the app. */
+export function toAIUnavailableError(err: unknown): AIUnavailableError {
+  if (err instanceof ApiError) {
+    return new AIUnavailableError(err.message, { status: err.status, transient: TRANSIENT_GEMINI_STATUSES.includes(err.status) });
+  }
+  const message = err instanceof Error ? err.message : "Gemini request failed.";
+  return new AIUnavailableError(message, { transient: true, networkLevel: err instanceof TypeError });
+}
+
+/** True only for a network-level failure (no HTTP response) — the one kind
+ * the SDK's GEMINI_RETRY doesn't re-send. Transient HTTP errors and
+ * timeouts have already been handled by the SDK and must not be retried
+ * again by the app (that would multiply Gemini calls per report). */
+export function isNetworkLevelAIFailure(err: unknown): boolean {
+  return err instanceof AIUnavailableError && err.networkLevel;
+}
 
 /** Gemini structured-output schema mirroring `analysisSchema` above. Fields
  * that are `.nullable()` in the Zod schema get `nullable: true` here so the
@@ -235,13 +313,19 @@ export async function analyzeReport(input: {
   imageMimeType?: string;
   /** Configured department names (the `departments` table). */
   departmentNames?: string[];
-}): Promise<AIAnalysisResult> {
+}, options: {
+  /** Overall deadline for this analysis, across the SDK's retries: once it
+   * fires, the in-flight attempt is aborted and no further SDK retry is
+   * made (see analyzeReportWithinBudget). */
+  signal?: AbortSignal;
+} = {}): Promise<AIAnalysisResult> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new AIUnavailableError("GEMINI_API_KEY is not configured.");
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({ apiKey, httpOptions: { retryOptions: GEMINI_RETRY, timeout: GEMINI_ATTEMPT_TIMEOUT_MS } });
+  const model = resolveGeminiModel();
   const departmentNames = input.departmentNames ?? [];
 
   const parts: Array<Record<string, unknown>> = [
@@ -254,18 +338,17 @@ export async function analyzeReport(input: {
   let text: string | undefined;
   try {
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model,
       contents: [{ role: "user", parts }],
       config: {
         responseMimeType: "application/json",
         responseSchema: responseSchemaFor(departmentNames),
+        ...(options.signal ? { abortSignal: options.signal } : {}),
       },
     });
     text = response.text;
   } catch (err) {
-    throw new AIUnavailableError(
-      err instanceof Error ? err.message : "Gemini request failed."
-    );
+    throw toAIUnavailableError(err);
   }
 
   if (!text) {
@@ -286,5 +369,51 @@ export async function analyzeReport(input: {
     );
   }
 
-  return { ...result.data, model: MODEL };
+  return { ...result.data, model };
+}
+
+/** Total time (ms) one report's AI analysis may take, across every attempt
+ * and backoff wait. Server Actions that run this declare maxDuration = 60
+ * on their page; this leaves the rest for upload, DB writes, routing,
+ * notifications and incident linking (whose own Gemini call is capped at
+ * 10s — src/lib/incident-ai-confirm.ts). */
+export const AI_TOTAL_BUDGET_MS = 30_000;
+
+/** Wait before the single app-level retry of a network-level failure. */
+export const NETWORK_RETRY_DELAY_MS = 1_000;
+
+/**
+ * One AI analysis for one report, inside a hard time budget:
+ *   - normal success: exactly 1 Gemini call;
+ *   - permanent error (missing key, 4xx, invalid output): 1 call, no retry;
+ *   - transient HTTP 429/500/502/503/504: re-sent ONLY by the SDK
+ *     (GEMINI_RETRY: up to 3 calls, ~1s then ~2s backoff with jitter);
+ *   - network-level failure (no HTTP response — the SDK doesn't re-send
+ *     it): ONE app-level retry after 1s, and only if a full attempt still
+ *     fits in the budget. That retry gets the SDK's retry again, so the
+ *     absolute maximum is 1 + 3 = 4 Gemini calls.
+ * The budget is an AbortSignal shared by every attempt: when it fires the
+ * in-flight request is aborted and the SDK makes no further retry, so the
+ * whole thing never exceeds `budgetMs` (+ a few ms) no matter how attempts
+ * fail. Each attempt is also capped at GEMINI_ATTEMPT_TIMEOUT_MS.
+ */
+export async function analyzeReportWithinBudget(
+  input: Parameters<typeof analyzeReport>[0],
+  deps: { budgetMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<AIAnalysisResult> {
+  const budgetMs = deps.budgetMs ?? AI_TOTAL_BUDGET_MS;
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + budgetMs;
+  const signal = AbortSignal.timeout(budgetMs);
+
+  try {
+    return await analyzeReport(input, { signal });
+  } catch (err) {
+    if (!isNetworkLevelAIFailure(err)) throw err;
+    // Only retry when a whole attempt (plus the wait) still fits.
+    if (deadline - now() < NETWORK_RETRY_DELAY_MS + GEMINI_ATTEMPT_TIMEOUT_MS) throw err;
+    await sleep(NETWORK_RETRY_DELAY_MS);
+    return analyzeReport(input, { signal });
+  }
 }

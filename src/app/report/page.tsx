@@ -5,6 +5,11 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { CTAButton } from "@/components/ui/CTAButton";
 import { ReportForm } from "./ReportForm";
 
+// The createReport Server Action on this page runs the Gemini analysis
+// inside a 30s budget (AI_TOTAL_BUDGET_MS, src/lib/ai.ts) on top of the
+// upload/DB work, so give it a 60s limit (allowed on every Vercel plan).
+export const maxDuration = 60;
+
 export const metadata: Metadata = {
   title: "Report a Problem — CivicFix",
 };

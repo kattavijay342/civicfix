@@ -52,7 +52,11 @@ export async function confirmSameIncident(input: {
     throw new IncidentAIUnavailableError("GEMINI_API_KEY is not configured.");
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  // One attempt, capped at 10s: this runs inside report submission after
+  // the main analysis (src/lib/ai.ts AI_TOTAL_BUDGET_MS), so it must fit the
+  // page's maxDuration. A timeout is an IncidentAIUnavailableError below,
+  // which incident-detection already treats as "no AI confirmation".
+  const ai = new GoogleGenAI({ apiKey, httpOptions: { timeout: 10_000 } });
 
   const prompt = [
     "You are helping a civic-issue platform decide whether two separately-submitted citizen reports describe the SAME real-world physical problem (e.g. the same pothole, the same broken streetlight) rather than two different problems that merely happen to be nearby or in the same category.",
