@@ -28,8 +28,8 @@ export const STATUS_EXPLANATIONS: Record<IssueStatus, { whatItMeans: LocalizedTe
       te: "మీ సమస్య విజయవంతంగా నమోదు చేయబడింది.",
     },
     nextStep: {
-      en: "CivicFix's AI will review it shortly and recommend a priority and department.",
-      te: "CivicFix AI త్వరలో దీనిని పరిశీలించి ప్రాధాన్యత మరియు విభాగాన్ని సూచిస్తుంది.",
+      en: "It will be routed to the department responsible for this type of issue.",
+      te: "ఇది ఈ రకమైన సమస్యకు బాధ్యత వహించే విభాగానికి పంపబడుతుంది.",
     },
   },
   AI_ANALYZED: {

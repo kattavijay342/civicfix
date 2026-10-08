@@ -20,7 +20,9 @@ export function RetryAnalysisButton({ reportId }: { reportId: string }) {
             setError(null);
             const result = await retryAiAnalysis(reportId);
             if (result.error) setError(result.error);
-            else router.refresh();
+            // Refresh either way: a retry also completes any missing routing,
+            // which succeeds even when AI is still unavailable.
+            router.refresh();
           })
         }
         className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-medium text-foreground shadow-sm ring-1 ring-border transition hover:ring-civic-300 disabled:opacity-60"

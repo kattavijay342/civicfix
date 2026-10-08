@@ -135,21 +135,55 @@ beforeEach(() => {
   };
 });
 
-describe("createReport — G3 routing", () => {
-  it("AI success: gives the AI the configured departments and routes to the authorized in-charge", async () => {
+const assignedNotifications = () => db.notifications.filter((n) => n.type === "report_assigned");
+const routedHistory = () => db.status_history.filter((h) => h.new_status === "routed");
+
+/** Failures shaped like the AIUnavailableError analyzeReportWithinBudget throws. */
+function geminiError(message: string, extra: Record<string, unknown> = {}) {
+  return Object.assign(new Error(message), { name: "AIUnavailableError", transient: true, ...extra });
+}
+
+describe("createReport — direct department routing (AI optional)", () => {
+  it("normal submission: saved, routed to the authorized in-charge by category, in-charge notified once", async () => {
     analyzeReportMock.mockResolvedValue(aiResult);
     const result = await createReport({ status: "idle" }, reportForm());
 
     expect(result).toMatchObject({ status: "success", aiFailed: false });
-    expect(analyzeReportMock.mock.calls[0][0].departmentNames).toEqual(["Roads & Infrastructure", "Water Supply"]);
-    expect(db.report_assignments).toHaveLength(1);
-    expect(db.report_assignments[0]).toMatchObject({ department_id: "dept-roads", incharge_id: "roads-incharge" });
+    expect(db.reports).toHaveLength(1);
     expect(db.reports[0].status).toBe("routed");
-    expect(db.notifications.filter((n) => n.type === "report_assigned").map((n) => n.recipient_id)).toEqual([
-      "roads-incharge",
+    expect(db.report_assignments).toEqual([
+      expect.objectContaining({ department_id: "dept-roads", incharge_id: "roads-incharge", assignment_method: "auto" }),
     ]);
+    expect(routedHistory()).toEqual([expect.objectContaining({ old_status: "reported", new_status: "routed" })]);
+    expect(assignedNotifications().map((n) => n.recipient_id)).toEqual(["roads-incharge"]);
     // The incident is owned by the department the report was actually routed to.
     expect(vi.mocked(evaluateIncidentForReport).mock.calls[0][1]).toMatchObject({ departmentId: "dept-roads" });
+  });
+
+  it("routes BEFORE calling Gemini — the department never depends on the AI", async () => {
+    let routedBeforeAi = false;
+    analyzeReportMock.mockImplementation(async () => {
+      routedBeforeAi = db.report_assignments.length === 1 && db.reports[0].status === "routed";
+      return { ...aiResult, recommended_department: "Water Supply", category: "water_leakage" };
+    });
+    await createReport({ status: "idle" }, reportForm());
+
+    expect(routedBeforeAi).toBe(true);
+    // A conflicting AI recommendation is stored as enrichment only.
+    expect(db.report_assignments).toEqual([expect.objectContaining({ department_id: "dept-roads" })]);
+    expect(db.ai_analyses[0]).toMatchObject({ recommended_department: "Water Supply" });
+  });
+
+  it("Gemini succeeds: department assigned AND AI enrichment saved, status stays routed", async () => {
+    analyzeReportMock.mockResolvedValue(aiResult);
+    await createReport({ status: "idle" }, reportForm());
+
+    expect(analyzeReportMock.mock.calls[0][0].departmentNames).toEqual(["Roads & Infrastructure", "Water Supply"]);
+    expect(db.ai_analyses).toHaveLength(1);
+    expect(db.reports[0]).toMatchObject({ status: "routed", severity: "high", priority: "high" });
+    expect(db.status_history.some((h) => h.new_status === "ai_analyzed")).toBe(false);
+    expect(db.notifications.filter((n) => n.type === "ai_analysis_completed")).toHaveLength(1);
+    expect(vi.mocked(notifyGovernmentOfNewReport).mock.calls[0][1]).toMatchObject({ priority: "high" });
   });
 
   it("ignores client-supplied department/assignee fields — the server derives the assignment", async () => {
@@ -163,34 +197,55 @@ describe("createReport — G3 routing", () => {
     expect(db.notifications.some((n) => n.recipient_id === "water-incharge")).toBe(false);
   });
 
-  it("AI failure: the report is saved and stays visible, but is NOT routed and no department is invented", async () => {
-    analyzeReportMock.mockRejectedValue(new Error("503 Service Unavailable"));
-    const result = await createReport({ status: "idle" }, reportForm());
+  for (const [label, error] of [
+    ["503 Service Unavailable", geminiError("503 high demand", { status: 503 })],
+    ["429 rate limit", geminiError("429 RESOURCE_EXHAUSTED", { status: 429 })],
+    ["timeout", geminiError("AI analysis timed out", { timedOut: true })],
+    ["missing API key", geminiError("GEMINI_API_KEY is not configured", { transient: false })],
+    ["unexpected error", new TypeError("Cannot read properties of undefined")],
+  ] as const) {
+    it(`Gemini ${label}: report still routed exactly once, usable, AI retryable`, async () => {
+      analyzeReportMock.mockRejectedValue(error);
+      const result = await createReport({ status: "idle" }, reportForm());
 
-    expect(result).toMatchObject({ status: "success", aiFailed: true });
-    expect(db.reports).toHaveLength(1);
-    expect(db.reports[0].status).toBe("reported");
-    expect(db.report_locations[0]).toMatchObject({ area: "Narasaraopet Municipality" });
-    expect(db.ai_analyses).toHaveLength(0);
-    expect(db.report_assignments).toHaveLength(0);
-    expect(db.notifications.some((n) => n.type === "report_assigned")).toBe(false);
-    // Government jurisdiction notification still goes out, with priority null (never guessed).
-    expect(vi.mocked(notifyGovernmentOfNewReport).mock.calls[0][1]).toMatchObject({ priority: null });
-  }, 10_000);
+      expect(result).toMatchObject({ status: "success", aiFailed: true });
+      expect(db.reports[0].status).toBe("routed");
+      expect(db.report_assignments).toEqual([
+        expect.objectContaining({ department_id: "dept-roads", incharge_id: "roads-incharge" }),
+      ]);
+      expect(routedHistory()).toHaveLength(1);
+      expect(assignedNotifications()).toHaveLength(1);
+      expect(db.ai_analyses).toHaveLength(0); // no analysis -> retryable
+      expect(db.notifications.some((n) => n.type === "ai_analysis_completed")).toBe(false);
+      // Government jurisdiction notification still goes out, with priority null (never guessed).
+      expect(vi.mocked(notifyGovernmentOfNewReport).mock.calls[0][1]).toMatchObject({ priority: null });
+      expect(vi.mocked(evaluateIncidentForReport).mock.calls[0][1]).toMatchObject({ departmentId: "dept-roads" });
+    });
+  }
 
-  it("ai_analyses insert failure: report stays `reported` (retryable) — not analyzed, not routed, no success history/notifications", async () => {
+  it("ai_analyses insert failure: still routed, no AI analysis or AI notification, retryable", async () => {
     analyzeReportMock.mockResolvedValue(aiResult);
     forceNextError("ai_analyses", "insert failed");
     const result = await createReport({ status: "idle" }, reportForm());
 
     expect(result).toMatchObject({ status: "success", aiFailed: true });
-    expect(db.reports).toHaveLength(1);
-    expect(db.reports[0].status).toBe("reported");
+    expect(db.reports[0].status).toBe("routed");
+    expect(db.report_assignments).toHaveLength(1);
     expect(db.ai_analyses).toHaveLength(0);
+    expect(db.notifications.some((n) => n.type === "ai_analysis_completed")).toBe(false);
+  });
+
+  it("no configured department for the category: saved and visible, left unrouted — nothing invented", async () => {
+    db.departments = db.departments.filter((d) => d.id !== "dept-roads");
+    analyzeReportMock.mockResolvedValue(aiResult);
+    const result = await createReport({ status: "idle" }, reportForm());
+
+    expect(result).toMatchObject({ status: "success" });
+    expect(db.reports[0].status).toBe("reported");
     expect(db.report_assignments).toHaveLength(0);
-    expect(db.status_history.some((h) => h.new_status === "ai_analyzed" || h.new_status === "routed")).toBe(false);
-    expect(db.notifications.some((n) => n.type === "ai_analysis_completed" || n.type === "report_assigned")).toBe(false);
-    expect(vi.mocked(notifyGovernmentOfNewReport).mock.calls[0][1]).toMatchObject({ priority: null });
+    expect(assignedNotifications()).toHaveLength(0);
+    // AI enrichment is independent of routing and is still saved.
+    expect(db.ai_analyses).toHaveLength(1);
   });
 
   it("makes exactly one analysis request on the normal success path", async () => {
@@ -198,14 +253,45 @@ describe("createReport — G3 routing", () => {
     await createReport({ status: "idle" }, reportForm());
     expect(analyzeReportMock).toHaveBeenCalledTimes(1);
     expect(db.ai_analyses).toHaveLength(1);
-    expect(db.status_history.filter((h) => h.new_status === "ai_analyzed")).toHaveLength(1);
+  });
+
+  it("a repeated submission with the same idempotency key replays — no second report, routing or analysis", async () => {
+    vi.mocked(beginIdempotentAction).mockImplementation(actualIdempotency.beginIdempotentAction);
+    db.idempotency_keys = [];
+    analyzeReportMock.mockResolvedValue(aiResult);
+
+    const first = await createReport({ status: "idle" }, reportForm({ idempotencyKey: "key-1" }));
+    const second = await createReport({ status: "idle" }, reportForm({ idempotencyKey: "key-1" }));
+
+    expect(second).toEqual(first);
+    expect(db.reports).toHaveLength(1);
+    expect(db.report_assignments).toHaveLength(1);
+    expect(db.ai_analyses).toHaveLength(1);
+    expect(analyzeReportMock).toHaveBeenCalledTimes(1);
+    expect(assignedNotifications()).toHaveLength(1);
   });
 });
 
-describe("retryAiAnalysis — persistence and duplicate protection", () => {
+describe("retryAiAnalysis — enrichment only, routing untouched", () => {
   const REPORT_ID = "report-retry-1";
 
-  function seedReportedReport() {
+  /** A report as createReport now leaves it when Gemini failed: routed,
+   * assigned, notified — just no AI analysis yet. */
+  function seedRoutedReportWithoutAnalysis() {
+    seedLegacyUnroutedReport();
+    db.reports[0].status = "routed";
+    db.report_assignments.push({
+      report_id: REPORT_ID,
+      department_id: "dept-roads",
+      incharge_id: "roads-incharge",
+      assignment_method: "auto",
+      assigned_at: "2026-10-08T10:00:00Z",
+    });
+    db.notifications.push({ id: "n-assigned", recipient_id: "roads-incharge", type: "report_assigned", related_report_id: REPORT_ID });
+  }
+
+  /** A report submitted before routing stopped waiting for AI. */
+  function seedLegacyUnroutedReport() {
     db.reports.push({
       id: REPORT_ID,
       reporter_id: CITIZEN_ID,
@@ -229,22 +315,48 @@ describe("retryAiAnalysis — persistence and duplicate protection", () => {
     db.idempotency_keys = [];
   }
 
-  const successHistory = () => db.status_history.filter((h) => h.new_status === "ai_analyzed");
   const aiDoneNotifications = () => db.notifications.filter((n) => n.type === "ai_analysis_completed");
+  const assignmentSnapshot = () => JSON.parse(JSON.stringify(db.report_assignments));
 
-  it("success: analyzes, routes to the authorized in-charge, one history entry and one notification", async () => {
-    seedReportedReport();
-    analyzeReportMock.mockResolvedValue(aiResult);
+  it("retry after failure: AI enrichment saved, existing department assignment unchanged", async () => {
+    seedRoutedReportWithoutAnalysis();
+    const before = assignmentSnapshot();
+    analyzeReportMock.mockResolvedValue({ ...aiResult, recommended_department: "Water Supply" });
+
     expect(await retryAiAnalysis(REPORT_ID)).toEqual({});
     expect(analyzeReportMock).toHaveBeenCalledTimes(1);
     expect(db.ai_analyses).toHaveLength(1);
-    expect(db.report_assignments).toEqual([expect.objectContaining({ department_id: "dept-roads", incharge_id: "roads-incharge" })]);
-    expect(successHistory()).toHaveLength(1);
+    expect(db.reports[0]).toMatchObject({ status: "routed", severity: "high", priority: "high" });
+    expect(db.report_assignments).toEqual(before);
+    expect(db.status_history).toHaveLength(0);
+    expect(aiDoneNotifications()).toHaveLength(1);
+    expect(db.notifications.filter((n) => n.type === "report_assigned")).toHaveLength(1);
+  });
+
+  it("never moves an acknowledged report's status (AI only enriches)", async () => {
+    seedRoutedReportWithoutAnalysis();
+    db.reports[0].status = "acknowledged";
+    analyzeReportMock.mockResolvedValue(aiResult);
+
+    expect(await retryAiAnalysis(REPORT_ID)).toEqual({});
+    expect(analyzeReportMock).not.toHaveBeenCalled();
+    expect(db.reports[0].status).toBe("acknowledged");
+  });
+
+  it("repeat retry after success is a no-op: no second Gemini call, analysis or notification", async () => {
+    seedRoutedReportWithoutAnalysis();
+    analyzeReportMock.mockResolvedValue(aiResult);
+    await retryAiAnalysis(REPORT_ID);
+    expect(await retryAiAnalysis(REPORT_ID)).toEqual({});
+
+    expect(analyzeReportMock).toHaveBeenCalledTimes(1);
+    expect(db.ai_analyses).toHaveLength(1);
+    expect(db.report_assignments).toHaveLength(1);
     expect(aiDoneNotifications()).toHaveLength(1);
   });
 
-  it("two concurrent retries (double click / second tab): only ONE calls Gemini; no duplicate routing, history or notifications", async () => {
-    seedReportedReport();
+  it("two concurrent retries (double click / second tab): only ONE calls Gemini; no duplicates", async () => {
+    seedRoutedReportWithoutAnalysis();
     vi.mocked(beginIdempotentAction).mockImplementation(actualIdempotency.beginIdempotentAction);
     analyzeReportMock.mockImplementation(async () => {
       await new Promise((r) => setTimeout(r, 20));
@@ -258,16 +370,12 @@ describe("retryAiAnalysis — persistence and duplicate protection", () => {
     expect([a, b]).toContainEqual({ error: expect.stringMatching(/already being retried/) });
     expect(db.ai_analyses).toHaveLength(1);
     expect(db.report_assignments).toHaveLength(1);
-    expect(successHistory()).toHaveLength(1);
     expect(aiDoneNotifications()).toHaveLength(1);
     expect(db.notifications.filter((n) => n.type === "report_assigned")).toHaveLength(1);
-    // The finished claim replays its result instead of re-running.
-    expect(await retryAiAnalysis(REPORT_ID)).toEqual({});
-    expect(analyzeReportMock).toHaveBeenCalledTimes(1);
   });
 
   it("database backstop: if both requests got past the claim, UNIQUE(report_id) stops the second before any side effect", async () => {
-    seedReportedReport();
+    seedRoutedReportWithoutAnalysis();
     // Idempotency failing open (e.g. its table unavailable): both requests run.
     vi.mocked(beginIdempotentAction).mockImplementation(async () => ({ kind: "run", commit: vi.fn(), release: vi.fn() }));
     analyzeReportMock.mockImplementation(async () => {
@@ -280,13 +388,11 @@ describe("retryAiAnalysis — persistence and duplicate protection", () => {
     expect(results).toEqual([{}, {}]);
     expect(db.ai_analyses).toHaveLength(1);
     expect(db.report_assignments).toHaveLength(1);
-    expect(successHistory()).toHaveLength(1);
     expect(aiDoneNotifications()).toHaveLength(1);
-    expect(db.notifications.filter((n) => n.type === "report_assigned")).toHaveLength(1);
   });
 
-  it("ai_analyses insert failure: stays `reported` and retryable, no side effects, claim released", async () => {
-    seedReportedReport();
+  it("ai_analyses insert failure: stays routed and retryable, no AI side effects, claim released", async () => {
+    seedRoutedReportWithoutAnalysis();
     const release = vi.fn();
     const commit = vi.fn();
     vi.mocked(beginIdempotentAction).mockImplementation(async () => ({ kind: "run", commit, release }));
@@ -294,48 +400,74 @@ describe("retryAiAnalysis — persistence and duplicate protection", () => {
     forceNextError("ai_analyses", "insert failed");
 
     expect(await retryAiAnalysis(REPORT_ID)).toEqual({ error: "AI analysis is temporarily unavailable." });
-    expect(db.reports[0].status).toBe("reported");
+    expect(db.reports[0].status).toBe("routed");
     expect(db.ai_analyses).toHaveLength(0);
-    expect(db.report_assignments).toHaveLength(0);
-    expect(successHistory()).toHaveLength(0);
+    expect(db.report_assignments).toHaveLength(1);
     expect(aiDoneNotifications()).toHaveLength(0);
     expect(release).toHaveBeenCalledTimes(1);
     expect(commit).not.toHaveBeenCalled();
   });
 
-  it("status update failure: the inserted analysis row is reverted so the report stays retryable", async () => {
-    seedReportedReport();
+  it("severity/priority update failure: the inserted analysis row is reverted so the report stays retryable", async () => {
+    seedRoutedReportWithoutAnalysis();
     vi.mocked(beginIdempotentAction).mockImplementation(async () => ({ kind: "run", commit: vi.fn(), release: vi.fn() }));
     analyzeReportMock.mockResolvedValue(aiResult);
     forceNextError("reports", "update failed");
 
     expect(await retryAiAnalysis(REPORT_ID)).toEqual({ error: "AI analysis is temporarily unavailable." });
     clearForcedErrors();
-    expect(db.reports[0].status).toBe("reported");
+    expect(db.reports[0].status).toBe("routed");
     expect(db.ai_analyses).toHaveLength(0);
-    expect(db.report_assignments).toHaveLength(0);
-    expect(successHistory()).toHaveLength(0);
 
     // ...and a later retry succeeds normally.
     expect(await retryAiAnalysis(REPORT_ID)).toEqual({});
     expect(db.reports[0].status).toBe("routed");
     expect(db.ai_analyses).toHaveLength(1);
+    expect(db.report_assignments).toHaveLength(1);
   });
 
-  it("Gemini unavailable: no write at all, claim released for a later retry", async () => {
-    seedReportedReport();
-    const release = vi.fn();
-    vi.mocked(beginIdempotentAction).mockImplementation(async () => ({ kind: "run", commit: vi.fn(), release }));
+  for (const [label, error] of [
+    ["503", Object.assign(new Error("503 high demand"), { status: 503 })],
+    ["429", Object.assign(new Error("429 RESOURCE_EXHAUSTED"), { status: 429 })],
+    ["timeout", Object.assign(new Error("AI analysis timed out"), { timedOut: true })],
+  ] as const) {
+    it(`Gemini ${label} on retry: no write at all, still routed, claim released for a later retry`, async () => {
+      seedRoutedReportWithoutAnalysis();
+      const before = assignmentSnapshot();
+      const release = vi.fn();
+      vi.mocked(beginIdempotentAction).mockImplementation(async () => ({ kind: "run", commit: vi.fn(), release }));
+      analyzeReportMock.mockRejectedValue(error);
+
+      expect(await retryAiAnalysis(REPORT_ID)).toEqual({ error: "AI analysis is temporarily unavailable." });
+      expect(db.reports[0].status).toBe("routed");
+      expect(db.report_assignments).toEqual(before);
+      expect(db.ai_analyses).toHaveLength(0);
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it("legacy unrouted report: retry routes it even while Gemini is still down", async () => {
+    seedLegacyUnroutedReport();
     analyzeReportMock.mockRejectedValue(new Error("503 high demand"));
 
     expect(await retryAiAnalysis(REPORT_ID)).toEqual({ error: "AI analysis is temporarily unavailable." });
-    expect(db.reports[0].status).toBe("reported");
-    expect(db.ai_analyses).toHaveLength(0);
-    expect(release).toHaveBeenCalledTimes(1);
+    expect(db.reports[0].status).toBe("routed");
+    expect(db.report_assignments).toEqual([
+      expect.objectContaining({ department_id: "dept-roads", incharge_id: "roads-incharge" }),
+    ]);
+    expect(db.notifications.filter((n) => n.type === "report_assigned")).toHaveLength(1);
+
+    // A later successful retry only adds the analysis — no second routing.
+    analyzeReportMock.mockResolvedValue(aiResult);
+    expect(await retryAiAnalysis(REPORT_ID)).toEqual({});
+    expect(db.ai_analyses).toHaveLength(1);
+    expect(db.report_assignments).toHaveLength(1);
+    expect(db.status_history.filter((h) => h.new_status === "routed")).toHaveLength(1);
+    expect(db.notifications.filter((n) => n.type === "report_assigned")).toHaveLength(1);
   });
 
   it("claims per report BEFORE calling Gemini, keyed by report id and a time window", async () => {
-    seedReportedReport();
+    seedRoutedReportWithoutAnalysis();
     const order: string[] = [];
     vi.mocked(beginIdempotentAction).mockImplementation(async (_admin, _user, action, key) => {
       order.push(`claim:${action}:${String(key).split(":")[0]}`);

@@ -3,6 +3,7 @@ import {
   normalizeDepartmentName,
   matchConfiguredDepartment,
   decideDepartment,
+  decideDepartmentForCategory,
   jurisdictionMatchSpecificity,
   isJurisdictionCompatible,
   pickIncharge,
@@ -144,6 +145,34 @@ describe("decideDepartment", () => {
   });
 });
 
+describe("decideDepartmentForCategory — deterministic, AI-free routing", () => {
+  it("routes every category to its configured department", () => {
+    const expected = {
+      ROAD: "dept-roads",
+      INFRASTRUCTURE: "dept-roads",
+      GARBAGE: "dept-sanitation",
+      DUMPING: "dept-sanitation",
+      SEWAGE: "dept-sanitation",
+      WATER_LEAKAGE: "dept-water",
+      DRAINAGE: "dept-drainage",
+      STREETLIGHT: "dept-electrical",
+      OTHER: "dept-general",
+    } as const;
+    for (const [category, departmentId] of Object.entries(expected)) {
+      const decision = decideDepartmentForCategory(category as keyof typeof expected, DEPARTMENTS);
+      expect(decision).toMatchObject({ ok: true, basis: "category_mapping", department: { id: departmentId } });
+    }
+  });
+
+  it("is unresolved when the mapped department is not configured — never guessed", () => {
+    const withoutElectrical = DEPARTMENTS.filter((d) => d.name !== "Electrical");
+    expect(decideDepartmentForCategory("STREETLIGHT", withoutElectrical)).toEqual({
+      ok: false,
+      reason: "department_not_configured",
+    });
+  });
+});
+
 describe("jurisdiction compatibility", () => {
   it("matches an in-charge whose every set level equals the report's", () => {
     expect(isJurisdictionCompatible(incharge("a", { gov_state: "Andhra Pradesh", gov_district: "Palnadu" }), NARASARAOPET)).toBe(true);
@@ -223,7 +252,7 @@ describe("routingStateFor", () => {
   it("derives the state only from stored data", () => {
     expect(routingStateFor({ inchargeId: "u1" }, "ROUTED")).toBe("assigned");
     expect(routingStateFor({ inchargeId: null }, "ROUTED")).toBe("unassigned");
-    expect(routingStateFor(null, "REPORTED")).toBe("pending_ai");
+    expect(routingStateFor(null, "REPORTED")).toBe("pending_routing");
     expect(routingStateFor(null, "AI_ANALYZED")).toBe("pending_department");
     expect(routingStateFor(null, "RESOLVED")).toBe("not_routed");
   });

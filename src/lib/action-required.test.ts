@@ -129,7 +129,7 @@ describe("G5 action-required classification", () => {
       const r = reasons({ status: "reported", assignment: null });
       expect(r).toEqual(["routing_pending"]);
       const fu = { kind: "none" } as const;
-      expect(reasonLabel("routing_pending", { ageDays: 1, status: "reported", followUpState: fu })).toMatch(/awaiting AI analysis/);
+      expect(reasonLabel("routing_pending", { ageDays: 1, status: "reported", followUpState: fu })).toMatch(/not yet assigned to a department/);
       expect(reasonLabel("routing_pending", { ageDays: 1, status: "ai_analyzed", followUpState: fu })).toMatch(/no department matched/);
     });
     it("assignment without an in-charge → routing pending", () => {

@@ -48,7 +48,7 @@ beforeEach(() => {
       inchargeProfile("roads-tenali", "dept-roads"),
       inchargeProfile("water-narasaraopet", "dept-water"),
     ],
-    reports: [{ id: "report-1", status: "ai_analyzed" }],
+    reports: [{ id: "report-1", status: "reported" }],
     report_assignments: [],
     status_history: [],
     notifications: [],
@@ -67,9 +67,7 @@ const roadsInput = {
   reportId: "report-1",
   title: "Large pothole near RTC Bus Stand",
   categoryLabel: "Road / Pothole",
-  citizenCategory: "ROAD" as const,
-  aiCategory: "ROAD" as const,
-  aiRecommendation: "Roads & Buildings Department",
+  category: "ROAD" as const,
   priority: "high",
   location: NARASARAOPET,
 };
@@ -82,7 +80,7 @@ describe("routeReport — valid assignment", () => {
       outcome: "routed",
       departmentId: "dept-roads",
       inchargeId: "roads-narasaraopet",
-      basis: "ai_recommendation",
+      basis: "category_mapping",
     });
     expect(db.report_assignments).toHaveLength(1);
     expect(db.report_assignments[0]).toMatchObject({
@@ -92,8 +90,21 @@ describe("routeReport — valid assignment", () => {
       assignment_method: "auto",
     });
     expect(db.reports[0].status).toBe("routed");
+    expect(db.status_history[0]).toMatchObject({ old_status: "reported", new_status: "routed" });
+    expect(String(db.status_history[0].notes)).toContain("configured category mapping");
+  });
+
+  it("routes with no AI input at all, and with no priority yet (AI runs afterwards)", async () => {
+    const result = await routeReport(admin, { ...roadsInput, priority: null });
+    expect(result).toMatchObject({ outcome: "routed", departmentId: "dept-roads", inchargeId: "roads-narasaraopet" });
+    expect(db.notifications[0]).toMatchObject({ recipient_id: "roads-narasaraopet", priority: "normal" });
+  });
+
+  it("routes a legacy report left at ai_analyzed, logging its real previous status", async () => {
+    db.reports[0].status = "ai_analyzed";
+    await routeReport(admin, roadsInput);
+    expect(db.reports[0].status).toBe("routed");
     expect(db.status_history[0]).toMatchObject({ old_status: "ai_analyzed", new_status: "routed" });
-    expect(String(db.status_history[0].notes)).toContain("AI recommendation validated");
   });
 
   it("notifies exactly the assigned in-charge, in-app, with no citizen data", async () => {
@@ -127,7 +138,7 @@ describe("routeReport — valid assignment", () => {
   it("does not pick a same-department in-charge from another jurisdiction", async () => {
     const tenali = await resolveAssignment(
       admin,
-      { aiRecommendation: "Roads & Infrastructure", aiCategory: "ROAD", citizenCategory: "ROAD" },
+      { category: "ROAD" },
       NARASARAOPET
     );
     expect(tenali).toMatchObject({ ok: true, inchargeId: "roads-narasaraopet" });
@@ -135,7 +146,7 @@ describe("routeReport — valid assignment", () => {
     db.department_incharges = db.department_incharges.filter((r) => r.profile_id !== "roads-narasaraopet");
     const withoutLocal = await resolveAssignment(
       admin,
-      { aiRecommendation: "Roads & Infrastructure", aiCategory: "ROAD", citizenCategory: "ROAD" },
+      { category: "ROAD" },
       NARASARAOPET
     );
     expect(withoutLocal).toMatchObject({ ok: true, departmentId: "dept-roads", inchargeId: null });
@@ -143,35 +154,35 @@ describe("routeReport — valid assignment", () => {
 
   it("ignores inactive rows and accounts no longer in-charge of that department", async () => {
     db.department_incharges[0].is_active = false;
-    let r = await resolveAssignment(admin, { aiRecommendation: null, aiCategory: "ROAD", citizenCategory: "ROAD" }, NARASARAOPET);
+    let r = await resolveAssignment(admin, { category: "ROAD" }, NARASARAOPET);
     expect(r).toMatchObject({ ok: true, inchargeId: null });
 
     db.department_incharges[0].is_active = true;
     db.profiles[0].role = "citizen"; // demoted, stale routing row left behind
-    r = await resolveAssignment(admin, { aiRecommendation: null, aiCategory: "ROAD", citizenCategory: "ROAD" }, NARASARAOPET);
+    r = await resolveAssignment(admin, { category: "ROAD" }, NARASARAOPET);
     expect(r).toMatchObject({ ok: true, inchargeId: null });
 
     db.profiles[0].role = "department_incharge";
     db.profiles[0].department_id = "dept-water"; // moved to another department
-    r = await resolveAssignment(admin, { aiRecommendation: null, aiCategory: "ROAD", citizenCategory: "ROAD" }, NARASARAOPET);
+    r = await resolveAssignment(admin, { category: "ROAD" }, NARASARAOPET);
     expect(r).toMatchObject({ ok: true, inchargeId: null });
   });
 });
 
 describe("routeReport — invalid / unknown department", () => {
-  it("an inconsistent AI recommendation (Water Supply for a pothole) still routes to Roads via the configured mapping", async () => {
-    const result = await routeReport(admin, { ...roadsInput, aiRecommendation: "Water Supply" });
-    expect(result).toMatchObject({ outcome: "routed", departmentId: "dept-roads", basis: "category_mapping" });
-    expect(db.notifications.every((n) => n.recipient_id !== "water-narasaraopet")).toBe(true);
+  it("a water leakage report routes to Water Supply, never to Roads", async () => {
+    const result = await routeReport(admin, { ...roadsInput, category: "WATER_LEAKAGE" });
+    expect(result).toMatchObject({ outcome: "routed", departmentId: "dept-water", basis: "category_mapping" });
+    expect(db.notifications.map((n) => n.recipient_id)).toEqual(["water-narasaraopet"]);
   });
 
-  it("leaves the report unrouted (ai_analyzed) when no configured department fits — nothing invented", async () => {
+  it("leaves the report unrouted (reported) when no configured department fits — nothing invented", async () => {
     db.departments = db.departments.filter((d) => d.id !== "dept-roads");
-    const result = await routeReport(admin, { ...roadsInput, aiRecommendation: "Ministry of Roads" });
+    const result = await routeReport(admin, roadsInput);
 
     expect(result).toEqual({ outcome: "unresolved", reason: "department_not_configured" });
     expect(db.report_assignments).toHaveLength(0);
-    expect(db.reports[0].status).toBe("ai_analyzed");
+    expect(db.reports[0].status).toBe("reported");
     expect(db.status_history).toHaveLength(0);
     expect(db.notifications).toHaveLength(0);
     expect(console.warn).toHaveBeenCalled();
@@ -181,7 +192,7 @@ describe("routeReport — invalid / unknown department", () => {
 describe("routeReport — duplicate side-effect prevention", () => {
   it("a second routing run is a no-op: no second assignment, status row, or notification", async () => {
     await routeReport(admin, roadsInput);
-    db.reports[0].status = "ai_analyzed"; // simulate a racing run that read the old status
+    db.reports[0].status = "reported"; // simulate a racing run that read the old status
     const second = await routeReport(admin, roadsInput);
 
     expect(second).toEqual({ outcome: "already_routed" });
@@ -201,12 +212,12 @@ describe("routeReport — duplicate side-effect prevention", () => {
     const result = await routeReport(admin, roadsInput);
 
     expect(result).toEqual({ outcome: "failed" });
-    expect(db.reports[0].status).toBe("ai_analyzed");
+    expect(db.reports[0].status).toBe("reported");
     expect(db.status_history).toHaveLength(0);
     expect(db.notifications).toHaveLength(0);
   });
 
-  it("never moves a report backwards if it already advanced past ai_analyzed", async () => {
+  it("never moves a report backwards if it already advanced past routed", async () => {
     db.reports[0].status = "acknowledged";
     await routeReport(admin, roadsInput);
     expect(db.reports[0].status).toBe("acknowledged");

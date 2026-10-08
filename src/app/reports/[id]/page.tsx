@@ -128,7 +128,9 @@ async function RealReportDetail({ id }: { id: string }) {
   const isOwner = session?.user.id === report.reporterId;
   const incidentNote = isOwner ? await getCitizenIncidentNote(report.id) : null;
   const isGovOrAdmin = session?.profile.role === "government" || session?.profile.role === "admin";
-  const aiPending = !report.aiAnalysis && report.status === "REPORTED";
+  // AI is optional enrichment, independent of routing: a missing analysis is
+  // retryable until the department acknowledges (mirrors retryAiAnalysis).
+  const aiPending = !report.aiAnalysis && (report.status === "REPORTED" || report.status === "ROUTED");
   // agingLabel() treats 0 as "Resolved", so an unresolved same-day report
   // must never compute to 0 — floor it at 1.
   const daysPending = report.status === "RESOLVED" ? 0 : Math.max(1, daysBetween(report.createdAt));
@@ -364,7 +366,9 @@ async function RealReportDetail({ id }: { id: string }) {
                 <div className="mt-3 flex flex-col items-start gap-2">
                   <p className="flex items-center gap-1.5 text-sm text-priority-medium">
                     <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-                    AI analysis is temporarily unavailable.
+                    {report.assignment
+                      ? "AI analysis temporarily unavailable — report is already routed."
+                      : "AI analysis is temporarily unavailable."}
                   </p>
                   {isOwner && <RetryAnalysisButton reportId={report.id} />}
                 </div>

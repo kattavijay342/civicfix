@@ -7,7 +7,6 @@ import { analyzeReport, analyzeReportWithinBudget } from "@/lib/ai";
 import { findPossibleDuplicate } from "@/lib/duplicate-detection";
 import { evaluateIncidentForReport } from "@/lib/incident-linking";
 import { loadConfiguredDepartments, routeReport, type RouteReportResult } from "@/lib/actions/routing";
-import { logStatusChange } from "@/lib/actions/status-history";
 import { categoryToDb, categoryFromDb } from "@/lib/db-enums";
 import { categoryLabels } from "@/lib/categories";
 import { isValidReporterName, isValidIndianMobile, formatIndianMobile } from "@/lib/validators";
@@ -50,15 +49,15 @@ const AI_UNAVAILABLE_MESSAGE = "AI analysis is temporarily unavailable.";
 const UNIQUE_VIOLATION = "23505";
 
 /**
- * Persists a completed analysis for a report that is still `reported`:
- * inserts the ai_analyses row, then compare-and-sets the report to
- * `ai_analyzed`. Nothing else (history, notifications, routing) may run
- * unless this returns "persisted", so a failed write never leaves a report
- * marked analyzed/routed without its analysis:
- *   - insert fails                 -> "failed"   (report stays `reported`, retryable)
+ * Persists a completed analysis as pure enrichment: inserts the
+ * ai_analyses row, then copies severity/priority onto the report. It never
+ * touches the lifecycle status — routing already happened (or is pending)
+ * independently, and AI must not move a report forwards or backwards.
+ * Nothing else (notifications) may run unless this returns "persisted":
+ *   - insert fails                 -> "failed"   (no analysis, retryable)
  *   - insert hits UNIQUE(report_id) -> "already"  (another request persisted it first)
- *   - status update fails / no row still `reported` -> the just-inserted
- *     analysis row is deleted again, so the report stays retryable -> "failed"
+ *   - severity/priority update fails -> the just-inserted analysis row is
+ *     deleted again, so the report stays retryable -> "failed"
  */
 async function persistAnalysis(
   admin: ReturnType<typeof createAdminClient>,
@@ -74,12 +73,11 @@ async function persistAnalysis(
 
   const { data: updated, error: statusError } = await admin
     .from("reports")
-    .update({ severity: analysis.severity, priority: analysis.priority, status: "ai_analyzed" })
+    .update({ severity: analysis.severity, priority: analysis.priority })
     .eq("id", reportId)
-    .eq("status", "reported")
     .select("id");
   if (statusError || !updated || updated.length === 0) {
-    console.error("Status update after AI analysis failed; reverting the analysis row", reportId, statusError);
+    console.error("Severity/priority update after AI analysis failed; reverting the analysis row", reportId, statusError);
     const { error: revertError } = await admin.from("ai_analyses").delete().eq("report_id", reportId);
     if (revertError) console.error("Reverting the analysis row failed", reportId, revertError);
     return "failed";
@@ -160,30 +158,28 @@ async function notifyAiAnalysisComplete(
   }
 }
 
-/** Phase G3 — AI recommendation -> configured department -> authorized
- * in-charge, for a report whose AI analysis just succeeded. Runs outside
- * the AI try/catch so a routing problem is never mislabelled as an AI
- * failure, and never fails the already-saved report. */
-async function routeAnalyzedReport(
+/** Deterministic category -> configured department -> authorized
+ * in-charge routing for a saved report. Runs BEFORE (and independently of)
+ * AI analysis, so a Gemini failure can never leave a report unrouted. A
+ * routing problem never fails the already-saved report; the report stays
+ * unrouted and retryAiAnalysis completes the routing on the next retry. */
+async function routeSavedReport(
   admin: ReturnType<typeof createAdminClient>,
   input: {
     reportId: string;
     title: string;
-    citizenCategory: ProblemCategory;
-    analysis: Awaited<ReturnType<typeof analyzeReport>>;
+    category: ProblemCategory;
     location: JurisdictionLike;
-    departments: ConfiguredDepartment[];
+    departments?: ConfiguredDepartment[];
   }
 ): Promise<RouteReportResult | null> {
   try {
     return await routeReport(admin, {
       reportId: input.reportId,
       title: input.title,
-      categoryLabel: categoryLabels[input.citizenCategory],
-      citizenCategory: input.citizenCategory,
-      aiCategory: categoryFromDb[input.analysis.category] ?? null,
-      aiRecommendation: input.analysis.recommended_department,
-      priority: input.analysis.priority,
+      categoryLabel: categoryLabels[input.category],
+      category: input.category,
+      priority: null,
       location: input.location,
       departments: input.departments,
     });
@@ -456,6 +452,13 @@ async function performCreateReport(
 
   const departments = await loadConfiguredDepartments(admin);
 
+  // Direct department routing — the report is fully saved, so route it now,
+  // by its category, BEFORE the optional AI step. Gemini being down, rate
+  // limited or slow can therefore never stop a report reaching its department.
+  const routing = await routeSavedReport(admin, { reportId, title, category, location, departments });
+
+  // Optional AI enrichment (severity, priority, summary, suggested action).
+  // It never changes the department or the lifecycle status set above.
   let aiFailed = false;
   let completedAnalysis: Awaited<ReturnType<typeof analyzeReport>> | null = null;
   try {
@@ -468,10 +471,10 @@ async function performCreateReport(
       departmentNames: departments.map((d) => d.name),
     });
 
-    // Only a persisted analysis counts: if the row or the status update
-    // can't be written, this is treated exactly like an AI failure — the
-    // report stays `reported` (retryable), with no history, notification or
-    // routing. (A brand-new report can't hit "already".)
+    // Only a persisted analysis counts: if the row or the severity/priority
+    // update can't be written, this is treated exactly like an AI failure —
+    // the report keeps its routing and stays retryable, with no AI
+    // notification. (A brand-new report can't hit "already".)
     if ((await persistAnalysis(admin, reportId, analysis)) !== "persisted") {
       throw new Error("AI analysis could not be saved");
     }
@@ -482,29 +485,14 @@ async function performCreateReport(
   }
 
   if (completedAnalysis) {
-    // Best-effort side effects of an analysis that IS saved: a failure here
+    // Best-effort side effect of an analysis that IS saved: a failure here
     // must not relabel a successfully analyzed report as an AI failure.
     try {
-      await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete");
       await notifyAiAnalysisComplete(admin, { reportId, reporterId: user.id, title, analysis: completedAnalysis, location });
     } catch (err) {
-      console.error("Post-analysis history/notification failed (non-fatal)", reportId, err);
+      console.error("Post-analysis notification failed (non-fatal)", reportId, err);
     }
   }
-
-  // No AI analysis -> no routing: the report stays "reported" (Routing
-  // pending) and is routed by retryAiAnalysis once analysis succeeds. A
-  // department is never guessed for an unanalyzed report.
-  const routing = completedAnalysis
-    ? await routeAnalyzedReport(admin, {
-        reportId,
-        title,
-        citizenCategory: category,
-        analysis: completedAnalysis,
-        location,
-        departments,
-      })
-    : null;
 
   // Phase G2 — REPORT_CREATED for the government users whose jurisdiction
   // covers this report. Sent after AI analysis so the payload carries the
@@ -547,8 +535,16 @@ async function performCreateReport(
   return { status: "success", reportId, aiFailed };
 }
 
+/** Statuses in which a missing AI analysis is still worth retrying: before
+ * the department has acknowledged the report. AI is enrichment only, so a
+ * report that has moved further along simply goes without it. */
+const AI_RETRYABLE_STATUSES = new Set(["reported", "routed"]);
+
 /** Manual retry when AI analysis failed at submission time (Step 21: no
- * indefinite auto-retry — this is the explicit user-triggered retry). */
+ * indefinite auto-retry — this is the explicit user-triggered retry). It
+ * first completes the report's routing if that never happened (idempotent —
+ * an already-routed report is untouched), then only enriches the report
+ * with AI; it never changes the department or the lifecycle status. */
 export async function retryAiAnalysis(reportId: string): Promise<{ error?: string }> {
   const supabase = await createClient();
   const {
@@ -569,9 +565,6 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
 
   if (!report || report.reporter_id !== user.id) {
     return { error: "Report not found." };
-  }
-  if (report.status !== "reported") {
-    return {};
   }
 
   const { data: location } = await admin
@@ -596,6 +589,24 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
     source: location.location_source,
   };
 
+  // Recovery for a report whose routing never completed (a transient
+  // routing write failure, or one submitted before routing stopped waiting
+  // for AI). UNIQUE(report_assignments.report_id) makes this a no-op for an
+  // already-routed report, so it never duplicates an assignment or
+  // notification — and it does not depend on Gemini being up.
+  if (report.status === "reported" || report.status === "ai_analyzed") {
+    await routeSavedReport(admin, { reportId, title: report.title, category, location: retryLocation });
+  }
+
+  const { data: existingAnalysis } = await admin
+    .from("ai_analyses")
+    .select("report_id")
+    .eq("report_id", reportId)
+    .maybeSingle();
+  if (existingAnalysis || !AI_RETRYABLE_STATUSES.has(report.status)) {
+    return {};
+  }
+
   // Claim this report's retry BEFORE calling Gemini, with the same
   // idempotency mechanism createReport uses: a double click or a second tab
   // gets "in progress" (or the finished result) and never makes its own
@@ -606,9 +617,8 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
   if (claim.kind === "in_progress") return { error: AI_RETRY_IN_PROGRESS_MESSAGE };
 
   let analysis: Awaited<ReturnType<typeof analyzeReport>>;
-  let departments: ConfiguredDepartment[];
   try {
-    departments = await loadConfiguredDepartments(admin);
+    const departments = await loadConfiguredDepartments(admin);
     analysis = await analyzeWithRetry({
       description: report.description,
       category,
@@ -623,19 +633,18 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
   const persisted = await persistAnalysis(admin, reportId, analysis);
   if (persisted === "already") {
     // Database backstop: another request (e.g. one that straddled a claim
-    // window) saved this report's analysis first and owns its history,
-    // notifications and routing — this one does none of them.
+    // window) saved this report's analysis first and owns its
+    // notifications — this one sends none.
     await claim.commit({});
     return {};
   }
   if (persisted === "failed") {
-    await claim.release(); // report stays `reported` and retryable
+    await claim.release(); // still no analysis — retryable
     return { error: AI_UNAVAILABLE_MESSAGE };
   }
 
   // Only the request that persisted the analysis gets here.
   try {
-    await logStatusChange(admin, reportId, "reported", "ai_analyzed", null, "AI analysis complete (retry)");
     await notifyAiAnalysisComplete(admin, {
       reportId,
       reporterId: report.reporter_id,
@@ -644,17 +653,8 @@ export async function retryAiAnalysis(reportId: string): Promise<{ error?: strin
       location: retryLocation,
     });
   } catch (err) {
-    console.error("Post-analysis history/notification failed (non-fatal)", reportId, err);
+    console.error("Post-analysis notification failed (non-fatal)", reportId, err);
   }
-
-  await routeAnalyzedReport(admin, {
-    reportId,
-    title: report.title,
-    citizenCategory: category,
-    analysis,
-    location: retryLocation,
-    departments,
-  });
 
   await claim.commit({});
   return {};

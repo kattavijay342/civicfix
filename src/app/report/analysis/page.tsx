@@ -1,8 +1,9 @@
 import Link from "next/link";
 import Image from "next/image";
 import { notFound } from "next/navigation";
-import { ArrowLeft, ArrowRight, Sparkles, Building2, MapPin, AlertTriangle } from "lucide-react";
+import { ArrowLeft, ArrowRight, Sparkles, Building2, MapPin, AlertTriangle, CheckCircle2, FileCheck2 } from "lucide-react";
 import { PriorityBadge } from "@/components/ui/PriorityBadge";
+import { statusLabels } from "@/components/ui/StatusBadge";
 import { ReportProgress } from "@/components/report/ReportProgress";
 import { JurisdictionChain } from "@/components/cards/JurisdictionChain";
 import { AIAnalysisDetails } from "@/components/cards/AIAnalysisDetails";
@@ -25,7 +26,7 @@ export default async function AnalysisPage({
   const report = await getReportDetail(reportId);
   if (!report) notFound();
 
-  const { aiAnalysis } = report;
+  const { aiAnalysis, assignment } = report;
 
   return (
     <div className="bg-surface-muted">
@@ -48,15 +49,49 @@ export default async function AnalysisPage({
           </div>
         </div>
 
+        {/* Routing and AI are independent: routing is decided by the issue
+            category before AI runs, so this card is shown whether or not
+            AI analysis succeeded. */}
+        <div
+          className="mt-8 rounded-2xl border border-border bg-white p-6"
+          data-testid="submission-summary"
+        >
+          <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <CheckCircle2 className="h-4 w-4 text-civic-600" aria-hidden="true" />
+            Report submitted successfully
+          </p>
+          <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
+            <div>
+              <dt className="text-xs font-medium uppercase tracking-wide text-foreground-muted">Assigned to</dt>
+              <dd className="mt-1 font-semibold text-foreground" data-testid="assigned-department">
+                {assignment ? assignment.departmentName : "Routing pending"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium uppercase tracking-wide text-foreground-muted">Status</dt>
+              <dd className="mt-1 font-semibold text-foreground">{statusLabels[report.status]}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium uppercase tracking-wide text-foreground-muted">AI analysis</dt>
+              <dd className="mt-1 font-semibold text-foreground" data-testid="ai-analysis-state">
+                {aiAnalysis ? "Completed" : "Temporarily unavailable"}
+              </dd>
+            </div>
+          </dl>
+        </div>
+
         {!aiAnalysis ? (
           <div className="mt-10 flex flex-col items-center rounded-2xl border border-priority-medium/30 bg-priority-medium-bg px-6 py-14 text-center">
             <AlertTriangle className="h-8 w-8 text-priority-medium" aria-hidden="true" />
             <h3 className="mt-4 text-base font-semibold text-foreground">
-              AI analysis is temporarily unavailable.
+              {assignment
+                ? "AI analysis temporarily unavailable — report is already routed."
+                : "AI analysis is temporarily unavailable."}
             </h3>
             <p className="mt-1.5 max-w-sm text-sm text-foreground-muted">
-              Your report was saved successfully and is safe — report #{report.id.slice(0, 8)}. You can retry
-              analysis now, or check back later; it will also be retried the next time you open this page.
+              Your report was saved successfully and is safe — report #{report.id.slice(0, 8)}
+              {assignment ? `, assigned to ${assignment.departmentName}` : ""}. AI only adds priority, severity and a
+              summary; you can retry it now or check back later.
             </p>
             <RetryAnalysisButton reportId={report.id} />
             <Link
@@ -174,7 +209,7 @@ export default async function AnalysisPage({
                 <h2 className="text-sm font-semibold text-foreground">Routing</h2>
                 <ol className="mt-4 flex flex-col gap-3">
                   {[
-                    { icon: Sparkles, label: "AI Analysis Complete" },
+                    { icon: FileCheck2, label: "Report submitted" },
                     {
                       icon: Building2,
                       label: report.assignment ? report.assignment.departmentName : "Awaiting department routing",

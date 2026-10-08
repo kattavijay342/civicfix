@@ -1,9 +1,9 @@
 import type { ProblemCategory } from "./types";
 
 /**
- * The application's configured category -> department mapping. It is both
- * the deterministic fallback route and the consistency check the AI's
- * department recommendation must pass (see decideDepartment below).
+ * The application's configured category -> department mapping. This is the
+ * source of truth for routing: every report is routed by its category alone
+ * (decideDepartmentForCategory), so routing never depends on Gemini.
  */
 export const categoryDepartmentMap: Record<ProblemCategory, string> = {
   ROAD: "Roads & Infrastructure",
@@ -134,6 +134,27 @@ export function decideDepartment(input: {
   return { ok: false, reason: "department_not_configured" };
 }
 
+/**
+ * Deterministic routing — the citizen's (server-validated) category ->
+ * configured department, by name, through categoryDepartmentMap. No AI
+ * input: a Gemini outage can never stop or change a report's department.
+ * A department missing from the `departments` table is reported as
+ * unresolved, never guessed.
+ */
+export function decideDepartmentForCategory(
+  category: ProblemCategory,
+  departments: ConfiguredDepartment[]
+): DepartmentDecision {
+  const mapped = departments.find((d) => d.name === categoryDepartmentMap[category]);
+  if (!mapped) return { ok: false, reason: "department_not_configured" };
+  return {
+    ok: true,
+    department: mapped,
+    basis: "category_mapping",
+    note: `Routed to ${mapped.name} by configured category mapping`,
+  };
+}
+
 export interface JurisdictionLike {
   state?: string | null;
   district?: string | null;
@@ -203,16 +224,20 @@ export function pickIncharge(candidates: InchargeCandidate[], location: Jurisdic
   return best?.candidate.profile_id ?? null;
 }
 
-export type RoutingState = "assigned" | "unassigned" | "pending_ai" | "pending_department" | "not_routed";
+export type RoutingState = "assigned" | "unassigned" | "pending_routing" | "pending_department" | "not_routed";
 
 /** The routing state shown on report detail — derived only from what is
- * stored, so it can never claim an assignment that doesn't exist. */
+ * stored, so it can never claim an assignment that doesn't exist. Routing
+ * no longer waits for AI, so an unassigned REPORTED report is simply not
+ * routed yet (e.g. its department isn't configured, or the routing write
+ * failed and will be completed by the next retry). AI_ANALYZED is legacy:
+ * reports analyzed before routing became deterministic. */
 export function routingStateFor(
   assignment: { inchargeId: string | null } | null,
   status: string
 ): RoutingState {
   if (assignment) return assignment.inchargeId ? "assigned" : "unassigned";
-  if (status === "REPORTED") return "pending_ai";
+  if (status === "REPORTED") return "pending_routing";
   if (status === "AI_ANALYZED") return "pending_department";
   return "not_routed";
 }
@@ -220,7 +245,7 @@ export function routingStateFor(
 export const ROUTING_STATE_LABELS: Record<RoutingState, string> = {
   assigned: "Assigned",
   unassigned: "Unassigned — no in-charge configured for this department and jurisdiction",
-  pending_ai: "Routing pending — waiting for AI analysis",
+  pending_routing: "Routing pending — not yet assigned to a department",
   pending_department: "Routing pending — no configured department matched",
   not_routed: "Not routed",
 };

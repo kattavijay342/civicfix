@@ -2,7 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ProblemCategory } from "@/lib/types";
 import {
-  decideDepartment,
+  decideDepartmentForCategory,
   departmentNameForCategory,
   pickIncharge,
   type ConfiguredDepartment,
@@ -67,25 +67,19 @@ export type AssignmentResolution =
   | { ok: false; reason: "department_not_configured" };
 
 /**
- * AI recommendation -> configured department -> authorized, jurisdiction-
- * compatible in-charge. Every input here is server-derived: the AI output
- * was schema-validated in src/lib/ai.ts, the category was validated by the
- * server action, and the location's jurisdiction was canonicalized by
+ * Category -> configured department -> authorized, jurisdiction-compatible
+ * in-charge. Deterministic and AI-free: the category was validated by the
+ * server action and the location's jurisdiction was canonicalized by
  * resolveReportJurisdiction(). Nothing a client sends can name a
  * department id or a user id.
  */
 export async function resolveAssignment(
   admin: SupabaseClient,
-  input: {
-    aiRecommendation: string | null;
-    aiCategory: ProblemCategory | null;
-    citizenCategory: ProblemCategory;
-    departments?: ConfiguredDepartment[];
-  },
+  input: { category: ProblemCategory; departments?: ConfiguredDepartment[] },
   location: JurisdictionLike
 ): Promise<AssignmentResolution> {
   const departments = input.departments ?? (await loadConfiguredDepartments(admin));
-  const decision = decideDepartment({ ...input, departments });
+  const decision = decideDepartmentForCategory(input.category, departments);
   if (!decision.ok) return decision;
 
   const inchargeId = await findIncharge(admin, decision.department.id, location);
@@ -99,8 +93,7 @@ export async function resolveAssignment(
   };
 }
 
-/** Category-only department lookup, for callers with no AI analysis (civic
- * incidents created while AI was unavailable). */
+/** Category-only department id lookup (civic incidents). */
 export async function departmentIdForCategory(
   admin: SupabaseClient,
   category: ProblemCategory
@@ -119,13 +112,19 @@ export type RouteReportResult =
   | { outcome: "unresolved"; reason: string }
   | { outcome: "failed" };
 
+/** Statuses a not-yet-routed report can be in: `reported` (every new
+ * report), or legacy `ai_analyzed` (analyzed before routing became
+ * deterministic, with no configured department at the time). */
+const UNROUTED_STATUSES = ["reported", "ai_analyzed"] as const;
+
 /**
- * Routes one AI-analyzed report. The unique report_assignments.report_id
- * constraint is the idempotency guard: only the call that actually inserts
- * the assignment advances the status and notifies, so a retry or a
- * concurrent run can't double-route or double-notify. An unresolved route
- * leaves the report at ai_analyzed ("Routing pending"), still fully visible
- * to government users by jurisdiction — it never invents a department.
+ * Routes one saved report by its category — independent of AI, which runs
+ * only after this. The unique report_assignments.report_id constraint is
+ * the idempotency guard: only the call that actually inserts the
+ * assignment advances the status and notifies, so a retry or a concurrent
+ * run can't double-route or double-notify. An unresolved route leaves the
+ * report unrouted ("Routing pending"), still fully visible to government
+ * users by jurisdiction — it never invents a department.
  */
 export async function routeReport(
   admin: SupabaseClient,
@@ -133,9 +132,8 @@ export async function routeReport(
     reportId: string;
     title: string;
     categoryLabel: string;
-    citizenCategory: ProblemCategory;
-    aiCategory: ProblemCategory | null;
-    aiRecommendation: string | null;
+    category: ProblemCategory;
+    /** Known priority, if any — null at submission (AI hasn't run yet). */
     priority: string | null;
     location: JurisdictionLike;
     departments?: ConfiguredDepartment[];
@@ -143,7 +141,7 @@ export async function routeReport(
 ): Promise<RouteReportResult> {
   const resolution = await resolveAssignment(admin, input, input.location);
   if (!resolution.ok) {
-    console.warn("[routing] unresolved — report left at ai_analyzed", {
+    console.warn("[routing] unresolved — report left unrouted", {
       reportId: input.reportId,
       reason: resolution.reason,
     });
@@ -162,14 +160,20 @@ export async function routeReport(
     return { outcome: "failed" };
   }
 
-  const { data: advanced } = await admin
-    .from("reports")
-    .update({ status: "routed" })
-    .eq("id", input.reportId)
-    .eq("status", "ai_analyzed")
-    .select("id");
-  if (advanced?.length) {
-    await logStatusChange(admin, input.reportId, "ai_analyzed", "routed", null, resolution.note);
+  // Compare-and-set from each unrouted status in turn, so the history row
+  // records the real previous status and a report that already moved on
+  // (acknowledged, …) is never moved backwards.
+  for (const fromStatus of UNROUTED_STATUSES) {
+    const { data: advanced } = await admin
+      .from("reports")
+      .update({ status: "routed" })
+      .eq("id", input.reportId)
+      .eq("status", fromStatus)
+      .select("id");
+    if (advanced?.length) {
+      await logStatusChange(admin, input.reportId, fromStatus, "routed", null, resolution.note);
+      break;
+    }
   }
 
   if (!resolution.inchargeId) {

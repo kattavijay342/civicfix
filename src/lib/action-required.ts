@@ -299,7 +299,7 @@ export function reasonLabel(
     case "pending_over_7_days":
       return `Pending for ${ctx.ageDays} days`;
     case "routing_pending":
-      if (ctx.status === "reported") return "Routing pending — awaiting AI analysis";
+      if (ctx.status === "reported") return "Routing pending — not yet assigned to a department";
       if (ctx.status === "ai_analyzed") return "Routing pending — no department matched";
       return "Unassigned — no in-charge";
     case "incharge_unavailable":
