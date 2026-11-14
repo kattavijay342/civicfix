@@ -41,7 +41,8 @@ let db: FakeDb;
 const client = () => makeFakeClient(db, { resolution_feedback: ["report_id"] });
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => client() }));
 
-const { submitResolutionFeedback, performSubmitFeedback } = await import("./resolution-feedback");
+const { submitResolutionFeedback } = await import("./resolution-feedback");
+const { performSubmitFeedback } = await import("./resolution-feedback-core");
 
 const REPORT = "report-1";
 const OTHER_REPORT = "report-2";

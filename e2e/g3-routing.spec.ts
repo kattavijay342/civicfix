@@ -2,6 +2,7 @@ import { test, expect, type Page, type Browser } from "@playwright/test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { TEST_DEPARTMENT_INCHARGE, TEST_GOVERNMENT } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * Phase G3 — AI -> Department routing, end to end in a real browser
@@ -19,15 +20,13 @@ import { AUTH_STATE_PATH } from "./global-setup";
  * Roads in Tenali (right department, wrong jurisdiction) and Water Supply
  * in Narasaraopet (right jurisdiction, wrong department).
  *
- * Needs .env.local (service role) to create/delete those users and the
+ * Needs .env.g8-local (local service role) to create/delete those users and the
  * test report, and to read back the stored assignment.
  */
 
-try {
-  process.loadEnvFile(".env.local");
-} catch {
-  // Env already provided by the shell/CI.
-}
+// LOCAL Supabase only (e2e/local-supabase-guard.ts): loads .env.g8-local, never
+// .env.local, and aborts this file for any non-local URL or hosted key.
+requireLocalSupabaseEnv();
 
 const RUN_STARTED = new Date().toISOString();
 const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -45,7 +44,7 @@ let aiOk = false;
  * recomputes severity/priority/confidence; deleting the report later
  * doesn't undo that). */
 let incidentSnapshot = new Map<string, { severity: string; priority: string; confidence: number }>();
-const AI_UNAVAILABLE = "Gemini analysis unavailable this run (quota/outage) — routed-path check not executed";
+const AI_UNAVAILABLE = "Gemini analysis unavailable this run (quota/outage) — routing still verified, AI enrichment not";
 const throwaway: Record<"roadsTenali" | "waterNarasaraopet", { id: string; email: string } | null> = {
   roadsTenali: null,
   waterNarasaraopet: null,
@@ -181,24 +180,13 @@ test.describe.serial("G3 AI -> department routing", () => {
         .eq("report_id", reportId!)
         .maybeSingle();
       aiOk = !!analysis;
-      if (!aiOk) {
-        // AI failure path: the report is kept, visible, and honestly unrouted.
-        test.info().annotations.push({ type: "ai-unavailable", description: AI_UNAVAILABLE });
-        const { data: report } = await admin.from("reports").select("status").eq("id", reportId!).single();
-        expect(report!.status).toBe("reported");
-        const { data: noAssignment } = await admin.from("report_assignments").select("report_id").eq("report_id", reportId!);
-        expect(noAssignment).toHaveLength(0);
-        const { data: loc } = await admin.from("report_locations").select("area").eq("report_id", reportId!).single();
-        expect(loc!.area).toBe("Narasaraopet Municipality");
-        await page.goto(`/reports/${reportId}`);
-        await expect(page.getByTestId("routing-state")).toHaveText("Routing pending — waiting for AI analysis", {
-          timeout: 15_000,
-        });
-        await expect(page.locator("dt", { hasText: "In-charge" })).toHaveCount(0);
-        await page.screenshot({ path: "test-results/g3-ai-failure-detail.png", fullPage: true });
-        return;
-      }
-      console.log("AI analysis:", JSON.stringify(analysis));
+      // Routing is deterministic (category -> configured department) and
+      // happens before AI, so everything below holds whether or not Gemini
+      // was available for this run — AI only adds enrichment.
+      await expect(page.getByTestId("assigned-department")).toHaveText("Roads & Infrastructure");
+      await expect(page.getByTestId("ai-analysis-state")).toHaveText(aiOk ? "Completed" : "Temporarily unavailable");
+      if (aiOk) console.log("AI analysis:", JSON.stringify(analysis));
+      else test.info().annotations.push({ type: "ai-unavailable", description: AI_UNAVAILABLE });
 
       const { data: incharge1 } = await admin.auth.admin.listUsers({ perPage: 1000 });
       const incharge1Id = incharge1.users.find((u) => u.email === TEST_DEPARTMENT_INCHARGE.email)!.id;
@@ -236,13 +224,6 @@ test.describe.serial("G3 AI -> department routing", () => {
 
     await page.goto(`/department?q=${encodeURIComponent(RUN_ID)}`);
     await expect(page.getByRole("heading", { name: "My Assigned Issues" })).toBeVisible({ timeout: 20_000 });
-    if (!aiOk) {
-      // Unrouted report: not assigned to anyone, so not visible to any in-charge.
-      await expect(page.getByText(TITLE)).toHaveCount(0);
-      await page.goto(`/reports/${reportId}`);
-      await expect(page.getByText("Report not found")).toBeVisible({ timeout: 15_000 });
-      test.skip(true, AI_UNAVAILABLE);
-    }
     const card = page.getByRole("link", { name: `View details for ${TITLE}` });
     await expect(card).toBeVisible({ timeout: 15_000 });
     await expect(card).toContainText("Roads & Infrastructure");
@@ -266,13 +247,11 @@ test.describe.serial("G3 AI -> department routing", () => {
     await page.goto(`/government/issues?search=${encodeURIComponent(RUN_ID)}`);
     const card = page.getByRole("link", { name: `View details for ${TITLE}` });
     await expect(card).toBeVisible({ timeout: 20_000 });
-    await expect(card).toContainText(aiOk ? "Roads & Infrastructure" : "Not yet routed");
+    await expect(card).toContainText("Roads & Infrastructure");
 
     await page.goto(`/reports/${reportId}`);
     await expect(page.getByRole("heading", { name: TITLE })).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("routing-state")).toHaveText(
-      aiOk ? "Assigned" : "Routing pending — waiting for AI analysis"
-    );
+    await expect(page.getByTestId("routing-state")).toHaveText("Assigned");
     await page.screenshot({ path: "test-results/g3-government-detail.png", fullPage: true });
   });
 

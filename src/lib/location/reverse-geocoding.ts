@@ -27,6 +27,7 @@ export async function reverseGeocode(latitude: number, longitude: number): Promi
   const url = new URL("https://api.mapbox.com/search/geocode/v6/reverse");
   url.searchParams.set("longitude", String(longitude));
   url.searchParams.set("latitude", String(latitude));
+  url.searchParams.set("language", "en");
   url.searchParams.set("access_token", token);
 
   let response: Response;
@@ -55,12 +56,7 @@ export async function reverseGeocode(latitude: number, longitude: number): Promi
     return { status: "unavailable", reason: "No address found for these coordinates." };
   }
 
-  const formattedAddress: string | undefined =
-    typeof feature.full_address === "string"
-      ? feature.full_address
-      : typeof feature.name === "string"
-        ? feature.name
-        : undefined;
+  const formattedAddress = bestAddress(feature);
   if (!formattedAddress) {
     return { status: "unavailable", reason: "Reverse-geocoding provider returned an incomplete result." };
   }
@@ -76,7 +72,20 @@ export async function reverseGeocode(latitude: number, longitude: number): Promi
 
 interface MapboxFeatureProperties {
   full_address?: unknown;
+  place_formatted?: unknown;
   name?: unknown;
+}
+
+/** Most readable address Mapbox gave us: full_address, else name +
+ * place_formatted, else whichever of those two exists. */
+function bestAddress(feature: MapboxFeatureProperties): string | undefined {
+  const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  const full = text(feature.full_address);
+  if (full) return full;
+  const name = text(feature.name);
+  const place = text(feature.place_formatted);
+  if (name && place) return `${name}, ${place}`;
+  return place ?? name;
 }
 
 /** Narrows the Mapbox Geocoding v6 FeatureCollection shape defensively —

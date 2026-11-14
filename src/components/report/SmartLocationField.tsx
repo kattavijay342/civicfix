@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MapPin, LocateFixed, Navigation, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { stateNames, getDistricts, getConstituencies, getAreas } from "@/lib/jurisdiction";
 import { locationBreakdown } from "@/lib/location-format";
@@ -9,7 +9,7 @@ import { sanitizeCoordinates } from "@/lib/location/validation";
 import { attemptReverseGeocode } from "@/lib/actions/location";
 import { LocationSearchBox } from "@/components/report/LocationSearchBox";
 import { CivicMap } from "@/components/map/CivicMap";
-import type { LocationSearchSuggestion } from "@/lib/location/types";
+import type { LocationSearchSuggestion, ReverseGeocodeOutcome } from "@/lib/location/types";
 import type { CivicLocation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +20,9 @@ interface SmartLocationFieldProps {
 }
 
 type PinSource = "gps" | "manual" | "search" | null;
+type AutoFillStatus = "idle" | "pending" | "filled" | "failed";
+
+const coordKey = (lat: number, lng: number) => `${lat.toFixed(6)},${lng.toFixed(6)}`;
 
 const secondaryBtn =
   "inline-flex items-center justify-center gap-1.5 rounded-full border px-4 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60";
@@ -48,6 +51,17 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
   // against Mapbox — see src/lib/location/reverse-geocoding.ts.
   const [addressNote, setAddressNote] = useState<string | null>(null);
   const [addressLookupPending, setAddressLookupPending] = useState(false);
+  // Confirming a map pin auto-fills the landmark field from the same
+  // reverse-geocode action. One lookup per coordinate pair (the GPS lookup
+  // above shares this cache); failures aren't cached so a retry can work.
+  const [autoFillStatus, setAutoFillStatus] = useState<AutoFillStatus>("idle");
+  const addressCache = useRef(new Map<string, Promise<ReverseGeocodeOutcome>>());
+  // Bumped whenever a pending auto-fill must no longer land: the citizen
+  // typed in the field, or moved/cleared/replaced the pin.
+  const autoFillSeq = useRef(0);
+  // Coordinates the field was last auto-filled for; null = the text (if
+  // any) is the citizen's own and is never replaced.
+  const autoFilledKey = useRef<string | null>(null);
 
   const districtOptions = useMemo(() => getDistricts(state), [state]);
   const constituencyOptions = useMemo(() => getConstituencies(state, district), [state, district]);
@@ -104,6 +118,32 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
     });
   }
 
+  // The lookup resolves after a render; read the latest jurisdiction state
+  // through this ref instead of the stale closure from the click.
+  const emitRef = useRef(emitLocation);
+  useEffect(() => {
+    emitRef.current = emitLocation;
+  });
+
+  function lookupAddress(lat: number, lng: number): Promise<ReverseGeocodeOutcome> {
+    const key = coordKey(lat, lng);
+    const cached = addressCache.current.get(key);
+    if (cached) return cached;
+    const request = attemptReverseGeocode(lat, lng)
+      .catch((): ReverseGeocodeOutcome => ({ status: "unavailable", reason: "Address lookup failed." }))
+      .then((outcome) => {
+        if (outcome.status !== "ok") addressCache.current.delete(key);
+        return outcome;
+      });
+    addressCache.current.set(key, request);
+    return request;
+  }
+
+  function cancelAutoFill() {
+    autoFillSeq.current++;
+    setAutoFillStatus("idle");
+  }
+
   function handleStateChange(next: string) {
     setState(next);
     setDistrict("");
@@ -141,6 +181,11 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
     if (jurisdictionReady) emitLocation({ landmark: next });
   }
 
+  function handleLandmarkInput(next: string) {
+    cancelAutoFill();
+    handleLandmarkChange(next);
+  }
+
   /** Fired for both a click and a drag-end on the map's single marker — a
    * real map, real coordinates, no percentage-based fake positioning. Any
    * hands-on placement/adjustment on the map itself is "manual," even if the
@@ -153,9 +198,11 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
     setPinConfirmed(false);
     setGpsCoords(null);
     setAddressNote(null);
+    cancelAutoFill();
   }
 
   function startManualPin() {
+    cancelAutoFill();
     setGpsCoords(null);
     setGpsNote(null);
     setAddressNote(null);
@@ -165,6 +212,7 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
   }
 
   function handleSearchSelect(suggestion: LocationSearchSuggestion) {
+    cancelAutoFill();
     setGpsCoords(null);
     setGpsNote(null);
     setPinSource("search");
@@ -174,7 +222,11 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
     setAddressNote(suggestion.context ? `${suggestion.label}, ${suggestion.context}` : suggestion.label);
     // Never overwrite something the citizen already typed themselves — only
     // fill the free-text landmark field when it's still empty.
-    if (!landmark.trim()) handleLandmarkChange(suggestion.label);
+    // That label is machine-filled too, so confirming may replace it.
+    if (!landmark.trim()) {
+      handleLandmarkChange(suggestion.label);
+      autoFilledKey.current = coordKey(suggestion.latitude, suggestion.longitude);
+    }
   }
 
   function handleUseCurrentLocation() {
@@ -183,6 +235,7 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
       setGpsNote(describeGeolocationFailure("unsupported"));
       return;
     }
+    cancelAutoFill();
     setGpsLoading(true);
     setGpsNote(null);
     setAddressNote(null);
@@ -205,7 +258,7 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
         // (src/lib/location/reverse-geocoding.ts) exactly once per confirmed
         // fix, never repeated for the same coordinates.
         setAddressLookupPending(true);
-        attemptReverseGeocode(sanitized.latitude, sanitized.longitude)
+        lookupAddress(sanitized.latitude, sanitized.longitude)
           .then((outcome) => {
             setAddressNote(
               outcome.status === "ok"
@@ -225,10 +278,35 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
 
   function confirmPin() {
     setPinConfirmed(true);
-    if (pinCoords) emitLocation({ latitude: pinCoords.lat, longitude: pinCoords.lng });
+    if (!pinCoords) return;
+    const { lat, lng } = pinCoords;
+    emitLocation({ latitude: lat, longitude: lng });
+
+    // Auto-fill the landmark field from the confirmed pin. Skipped when the
+    // field holds the citizen's own text (never auto-filled), or was already
+    // filled for these exact coordinates (possibly edited since).
+    const key = coordKey(lat, lng);
+    if (landmark.trim() && autoFilledKey.current === null) return;
+    if (landmark.trim() && autoFilledKey.current === key) return;
+
+    const seq = ++autoFillSeq.current;
+    setAutoFillStatus("pending");
+    lookupAddress(lat, lng).then((outcome) => {
+      if (seq !== autoFillSeq.current) return;
+      if (outcome.status !== "ok") {
+        setAutoFillStatus("failed");
+        return;
+      }
+      const address = outcome.result.formattedAddress;
+      autoFilledKey.current = key;
+      setLandmark(address);
+      setAutoFillStatus("filled");
+      emitRef.current({ landmark: address, latitude: lat, longitude: lng });
+    });
   }
 
   function resetPin() {
+    cancelAutoFill();
     setPinSource(null);
     setPinCoords(null);
     setPinConfirmed(false);
@@ -364,10 +442,19 @@ export function SmartLocationField({ value, onChange, error }: SmartLocationFiel
         <input
           id="loc-landmark"
           value={landmark}
-          onChange={(e) => handleLandmarkChange(e.target.value)}
+          onChange={(e) => handleLandmarkInput(e.target.value)}
           placeholder="e.g. Main Road near Government School"
           className={fieldClass}
         />
+        <p className="mt-1 text-[11px] text-foreground-muted/80" aria-live="polite">
+          {autoFillStatus === "pending"
+            ? "Getting location..."
+            : autoFillStatus === "filled"
+              ? "Location confirmed — filled from the map. You can edit it."
+              : autoFillStatus === "failed"
+                ? "Couldn't get an address for this spot — please type the location."
+                : null}
+        </p>
       </div>
 
       <div className="mt-5 border-t border-border pt-5">

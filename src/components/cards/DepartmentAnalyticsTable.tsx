@@ -1,3 +1,4 @@
+import { formatAvgResolutionDays } from "@/lib/government-analytics";
 import type { DepartmentPerformance } from "@/lib/types";
 
 export function DepartmentAnalyticsTable({ departments }: { departments: DepartmentPerformance[] }) {
@@ -26,7 +27,9 @@ export function DepartmentAnalyticsTable({ departments }: { departments: Departm
               <td className="px-5 py-3 text-xs text-foreground-muted">
                 {d.onTimeRate === null ? "No configured SLA" : `${d.onTimeRate}%`}
               </td>
-              <td className="px-5 py-3 text-foreground-muted">{d.avgResolutionDays.toFixed(1)} days</td>
+              <td className="px-5 py-3 text-foreground-muted" data-testid="avg-resolution-time">
+                {formatAvgResolutionDays(d.avgResolutionDays)}
+              </td>
             </tr>
           ))}
         </tbody>

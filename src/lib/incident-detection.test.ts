@@ -228,6 +228,49 @@ describe("findIncidentMatch", () => {
     expect(result?.relationshipType).toBe("candidate");
   });
 
+  it("AI-2 defer mode: an ambiguous match makes NO Gemini call and returns the same 'candidate' result, flagged for background confirmation", async () => {
+    const db: FakeDb = {
+      reports: [candidateReport({ description: "Streetlight flickers occasionally near the market." })],
+      report_locations: [locationRow({ area: "Ward 13" })],
+      ai_analyses: [],
+    };
+    vi.mocked(confirmSameIncident).mockClear();
+    const input = {
+      reportId: "new-1",
+      category: "road",
+      location: baseLocation({ area: "Ward 12", latitude: 16.2334, longitude: 80.05 }),
+      description: "Water pipe leaking heavily onto the road.",
+      createdAt: new Date().toISOString(),
+    };
+
+    const deferred = await findIncidentMatch(makeFakeClient(db) as never, input, { aiConfirmation: "defer" });
+
+    expect(confirmSameIncident).not.toHaveBeenCalled();
+    expect(deferred).toMatchObject({
+      reportId: "existing-1",
+      relationshipType: "candidate",
+      detectionMethod: "rule_based",
+      deferredConfirmation: true,
+    });
+  });
+
+  it("AI-2 defer mode leaves clear (non-ambiguous) matches unchanged", async () => {
+    const db: FakeDb = { reports: [candidateReport()], report_locations: [locationRow()], ai_analyses: [] };
+    vi.mocked(confirmSameIncident).mockClear();
+    const input = {
+      reportId: "new-1",
+      category: "road",
+      location: baseLocation(),
+      description: "There is a large pothole in the middle of the road that keeps growing after rain.",
+      createdAt: new Date().toISOString(),
+    };
+    const inline = await findIncidentMatch(makeFakeClient(db) as never, input);
+    const deferred = await findIncidentMatch(makeFakeClient(db) as never, input, { aiConfirmation: "defer" });
+    expect(deferred).toEqual(inline);
+    expect(deferred?.deferredConfirmation).toBeUndefined();
+    expect(confirmSameIncident).not.toHaveBeenCalled();
+  });
+
   it("returns null when there are no candidates at all", async () => {
     const db: FakeDb = { reports: [], report_locations: [], ai_analyses: [] };
     const result = await findIncidentMatch(makeFakeClient(db) as never, {

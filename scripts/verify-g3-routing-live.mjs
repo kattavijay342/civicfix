@@ -13,9 +13,16 @@
 // routing can never assign a real report to them while this runs. The
 // admin gets a random per-run password that is never printed. Every test
 // report and throwaway user is deleted before exit. Sends NO email.
-// Usage: node --env-file=.env.local scripts/verify-g3-routing-live.mjs
+// Usage: node --env-file=.env.g8-local scripts/verify-g3-routing-live.mjs
 import { randomBytes } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
+import { exitUnlessLocalSupabaseEnv } from "./lib/local-supabase-guard.mjs";
+
+// LOCAL Supabase only (scripts/lib/local-supabase-guard.mjs): loads .env.g8-local
+// if the env isn't set (never .env.local) and aborts before any client exists
+// unless the URL is http://127.0.0.1:54321 / http://localhost:54321 with the
+// local CLI's anon + service-role keys.
+exitUnlessLocalSupabaseEnv();
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;

@@ -63,6 +63,28 @@ export async function createNotification(
   admin: SupabaseClient,
   input: CreateNotificationInput
 ): Promise<CreatedNotification | null> {
+  const result = await createNotificationDetailed(admin, input);
+  return result.status === "created" ? { id: result.id } : null;
+}
+
+/** Outcome of one notification write, so callers that must guarantee
+ * delivery (AI-2 ensureAiAnalysisNotifications) can tell a recipient's
+ * opt-out apart from a real insert failure. */
+export type NotificationWriteResult =
+  | { status: "created"; id: string }
+  | { status: "skipped_preference" }
+  | { status: "failed" };
+
+/**
+ * createNotification's implementation with a three-way result. Behaviour is
+ * identical (same preference gate, same core insert, same best-effort
+ * enrichment, same logging); createNotification just collapses the two
+ * non-created outcomes to `null` as it always has.
+ */
+export async function createNotificationDetailed(
+  admin: SupabaseClient,
+  input: CreateNotificationInput
+): Promise<NotificationWriteResult> {
   if (!input.bypassPreferences) {
     const { data: recipient } = await admin
       .from("profiles")
@@ -73,7 +95,7 @@ export async function createNotification(
     const prefs = (recipient?.notification_preferences as NotificationPreferences | null) ?? null;
     const category = CATEGORY_BY_TYPE[input.type];
     if (!isCategoryEnabled(prefs, category)) {
-      return null;
+      return { status: "skipped_preference" };
     }
   }
 
@@ -105,7 +127,7 @@ export async function createNotification(
     // the existing "best-effort, non-fatal" pattern used elsewhere in this
     // codebase (e.g. duplicate detection in src/lib/actions/reports.ts).
     console.error("createNotification failed", input.type, error);
-    return null;
+    return { status: "failed" };
   }
 
   const { error: enrichError } = await admin
@@ -121,5 +143,5 @@ export async function createNotification(
     console.error("createNotification: enrichment update failed (non-fatal)", input.type, enrichError);
   }
 
-  return { id: data.id };
+  return { status: "created", id: data.id };
 }

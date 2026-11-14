@@ -35,14 +35,31 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 let db: FakeDb;
+/** In-memory stand-in for the `report-media` Storage bucket. */
+const storage = { objects: new Map<string, Buffer>(), failUpload: false };
 vi.mock("@/lib/supabase/admin", () => ({
   // Mirrors the real UNIQUE constraints these flows rely on.
-  createAdminClient: () =>
-    makeFakeClient(db, {
+  createAdminClient: () => ({
+    ...makeFakeClient(db, {
       report_assignments: ["report_id"],
       ai_analyses: ["report_id"],
       idempotency_keys: ["user_id", "action", "client_key"],
+      ai_analysis_jobs: ["report_id"],
     }),
+    storage: {
+      from: () => ({
+        upload: async (path: string, buffer: Buffer) => {
+          if (storage.failUpload) return { data: null, error: { message: "simulated storage outage" } };
+          storage.objects.set(path, buffer);
+          return { data: { path }, error: null };
+        },
+        remove: async (paths: string[]) => {
+          for (const p of paths) storage.objects.delete(p);
+          return { data: paths.map((name) => ({ name })), error: null };
+        },
+      }),
+    },
+  }),
 }));
 
 const { createReport, retryAiAnalysis } = await import("./reports");
@@ -107,6 +124,8 @@ const aiResult = {
 
 beforeEach(() => {
   clearForcedErrors();
+  storage.objects.clear();
+  storage.failUpload = false;
   vi.mocked(beginIdempotentAction).mockImplementation(async () => ({ kind: "run", commit: vi.fn(), release: vi.fn() }));
   analyzeReportMock.mockReset();
   vi.mocked(evaluateIncidentForReport).mockClear();
@@ -143,12 +162,13 @@ function geminiError(message: string, extra: Record<string, unknown> = {}) {
   return Object.assign(new Error(message), { name: "AIUnavailableError", transient: true, ...extra });
 }
 
-describe("createReport — direct department routing (AI optional)", () => {
-  it("normal submission: saved, routed to the authorized in-charge by category, in-charge notified once", async () => {
-    analyzeReportMock.mockResolvedValue(aiResult);
+describe("createReport — direct department routing, AI queued (never inline)", () => {
+  const aiJobs = () => db.ai_analysis_jobs ?? [];
+
+  it("normal submission: saved, routed to the authorized in-charge by category, in-charge notified once, AI job queued", async () => {
     const result = await createReport({ status: "idle" }, reportForm());
 
-    expect(result).toMatchObject({ status: "success", aiFailed: false });
+    expect(result).toMatchObject({ status: "success", aiQueued: true });
     expect(db.reports).toHaveLength(1);
     expect(db.reports[0].status).toBe("routed");
     expect(db.report_assignments).toEqual([
@@ -158,36 +178,26 @@ describe("createReport — direct department routing (AI optional)", () => {
     expect(assignedNotifications().map((n) => n.recipient_id)).toEqual(["roads-incharge"]);
     // The incident is owned by the department the report was actually routed to.
     expect(vi.mocked(evaluateIncidentForReport).mock.calls[0][1]).toMatchObject({ departmentId: "dept-roads" });
+    // Exactly one pending AI job for the saved report.
+    expect(aiJobs()).toEqual([expect.objectContaining({ report_id: db.reports[0].id, status: "pending" })]);
   });
 
-  it("routes BEFORE calling Gemini — the department never depends on the AI", async () => {
-    let routedBeforeAi = false;
-    analyzeReportMock.mockImplementation(async () => {
-      routedBeforeAi = db.report_assignments.length === 1 && db.reports[0].status === "routed";
-      return { ...aiResult, recommended_department: "Water Supply", category: "water_leakage" };
-    });
-    await createReport({ status: "idle" }, reportForm());
-
-    expect(routedBeforeAi).toBe(true);
-    // A conflicting AI recommendation is stored as enrichment only.
-    expect(db.report_assignments).toEqual([expect.objectContaining({ department_id: "dept-roads" })]);
-    expect(db.ai_analyses[0]).toMatchObject({ recommended_department: "Water Supply" });
-  });
-
-  it("Gemini succeeds: department assigned AND AI enrichment saved, status stays routed", async () => {
+  it("never calls Gemini during submission: no analysis, no AI notification, priority/severity left unknown", async () => {
     analyzeReportMock.mockResolvedValue(aiResult);
     await createReport({ status: "idle" }, reportForm());
 
-    expect(analyzeReportMock.mock.calls[0][0].departmentNames).toEqual(["Roads & Infrastructure", "Water Supply"]);
-    expect(db.ai_analyses).toHaveLength(1);
-    expect(db.reports[0]).toMatchObject({ status: "routed", severity: "high", priority: "high" });
+    expect(analyzeReportMock).not.toHaveBeenCalled();
+    expect(db.ai_analyses).toHaveLength(0);
+    expect(db.reports[0]).toMatchObject({ status: "routed" });
+    expect(db.reports[0].priority ?? null).toBeNull();
     expect(db.status_history.some((h) => h.new_status === "ai_analyzed")).toBe(false);
-    expect(db.notifications.filter((n) => n.type === "ai_analysis_completed")).toHaveLength(1);
-    expect(vi.mocked(notifyGovernmentOfNewReport).mock.calls[0][1]).toMatchObject({ priority: "high" });
+    expect(db.notifications.some((n) => n.type === "ai_analysis_completed")).toBe(false);
+    // Government jurisdiction notification still goes out, with priority null (never guessed).
+    expect(vi.mocked(notifyGovernmentOfNewReport).mock.calls[0][1]).toMatchObject({ priority: null });
+    expect(vi.mocked(evaluateIncidentForReport).mock.calls[0][1]).toMatchObject({ subcategory: null, severity: null });
   });
 
   it("ignores client-supplied department/assignee fields — the server derives the assignment", async () => {
-    analyzeReportMock.mockResolvedValue(aiResult);
     await createReport(
       { status: "idle" },
       reportForm({ department_id: "dept-water", departmentId: "dept-water", assigned_user_id: "water-incharge", incharge_id: "water-incharge" })
@@ -197,68 +207,45 @@ describe("createReport — direct department routing (AI optional)", () => {
     expect(db.notifications.some((n) => n.recipient_id === "water-incharge")).toBe(false);
   });
 
-  for (const [label, error] of [
-    ["503 Service Unavailable", geminiError("503 high demand", { status: 503 })],
-    ["429 rate limit", geminiError("429 RESOURCE_EXHAUSTED", { status: 429 })],
-    ["timeout", geminiError("AI analysis timed out", { timedOut: true })],
-    ["missing API key", geminiError("GEMINI_API_KEY is not configured", { transient: false })],
-    ["unexpected error", new TypeError("Cannot read properties of undefined")],
-  ] as const) {
-    it(`Gemini ${label}: report still routed exactly once, usable, AI retryable`, async () => {
-      analyzeReportMock.mockRejectedValue(error);
-      const result = await createReport({ status: "idle" }, reportForm());
-
-      expect(result).toMatchObject({ status: "success", aiFailed: true });
-      expect(db.reports[0].status).toBe("routed");
-      expect(db.report_assignments).toEqual([
-        expect.objectContaining({ department_id: "dept-roads", incharge_id: "roads-incharge" }),
-      ]);
-      expect(routedHistory()).toHaveLength(1);
-      expect(assignedNotifications()).toHaveLength(1);
-      expect(db.ai_analyses).toHaveLength(0); // no analysis -> retryable
-      expect(db.notifications.some((n) => n.type === "ai_analysis_completed")).toBe(false);
-      // Government jurisdiction notification still goes out, with priority null (never guessed).
-      expect(vi.mocked(notifyGovernmentOfNewReport).mock.calls[0][1]).toMatchObject({ priority: null });
-      expect(vi.mocked(evaluateIncidentForReport).mock.calls[0][1]).toMatchObject({ departmentId: "dept-roads" });
-    });
-  }
-
-  it("ai_analyses insert failure: still routed, no AI analysis or AI notification, retryable", async () => {
-    analyzeReportMock.mockResolvedValue(aiResult);
-    forceNextError("ai_analyses", "insert failed");
+  it("Gemini being down cannot affect submission: routed exactly once, AI job queued", async () => {
+    analyzeReportMock.mockRejectedValue(geminiError("503 high demand", { status: 503 }));
     const result = await createReport({ status: "idle" }, reportForm());
 
-    expect(result).toMatchObject({ status: "success", aiFailed: true });
+    expect(result).toMatchObject({ status: "success", aiQueued: true });
+    expect(analyzeReportMock).not.toHaveBeenCalled();
     expect(db.reports[0].status).toBe("routed");
-    expect(db.report_assignments).toHaveLength(1);
-    expect(db.ai_analyses).toHaveLength(0);
-    expect(db.notifications.some((n) => n.type === "ai_analysis_completed")).toBe(false);
+    expect(routedHistory()).toHaveLength(1);
+    expect(assignedNotifications()).toHaveLength(1);
+    expect(aiJobs()).toHaveLength(1);
   });
 
-  it("no configured department for the category: saved and visible, left unrouted — nothing invented", async () => {
-    db.departments = db.departments.filter((d) => d.id !== "dept-roads");
-    analyzeReportMock.mockResolvedValue(aiResult);
+  it("AI job enqueue failure: report still saved and routed, reported honestly as NOT queued", async () => {
+    forceNextError("ai_analysis_jobs", "insert failed");
     const result = await createReport({ status: "idle" }, reportForm());
 
-    expect(result).toMatchObject({ status: "success" });
+    expect(result).toMatchObject({ status: "success", aiQueued: false });
+    expect(db.reports).toHaveLength(1);
+    expect(db.reports[0].status).toBe("routed");
+    expect(db.report_assignments).toHaveLength(1);
+    expect(aiJobs()).toHaveLength(0);
+    expect(analyzeReportMock).not.toHaveBeenCalled();
+  });
+
+  it("no configured department for the category: saved and visible, left unrouted — AI job still queued", async () => {
+    db.departments = db.departments.filter((d) => d.id !== "dept-roads");
+    const result = await createReport({ status: "idle" }, reportForm());
+
+    expect(result).toMatchObject({ status: "success", aiQueued: true });
     expect(db.reports[0].status).toBe("reported");
     expect(db.report_assignments).toHaveLength(0);
     expect(assignedNotifications()).toHaveLength(0);
-    // AI enrichment is independent of routing and is still saved.
-    expect(db.ai_analyses).toHaveLength(1);
+    // AI enrichment is independent of routing and is still queued.
+    expect(aiJobs()).toHaveLength(1);
   });
 
-  it("makes exactly one analysis request on the normal success path", async () => {
-    analyzeReportMock.mockResolvedValue(aiResult);
-    await createReport({ status: "idle" }, reportForm());
-    expect(analyzeReportMock).toHaveBeenCalledTimes(1);
-    expect(db.ai_analyses).toHaveLength(1);
-  });
-
-  it("a repeated submission with the same idempotency key replays — no second report, routing or analysis", async () => {
+  it("a repeated submission with the same idempotency key replays — no second report, routing, job or Gemini call", async () => {
     vi.mocked(beginIdempotentAction).mockImplementation(actualIdempotency.beginIdempotentAction);
     db.idempotency_keys = [];
-    analyzeReportMock.mockResolvedValue(aiResult);
 
     const first = await createReport({ status: "idle" }, reportForm({ idempotencyKey: "key-1" }));
     const second = await createReport({ status: "idle" }, reportForm({ idempotencyKey: "key-1" }));
@@ -266,9 +253,205 @@ describe("createReport — direct department routing (AI optional)", () => {
     expect(second).toEqual(first);
     expect(db.reports).toHaveLength(1);
     expect(db.report_assignments).toHaveLength(1);
-    expect(db.ai_analyses).toHaveLength(1);
-    expect(analyzeReportMock).toHaveBeenCalledTimes(1);
+    expect(aiJobs()).toHaveLength(1);
+    expect(analyzeReportMock).not.toHaveBeenCalled();
     expect(assignedNotifications()).toHaveLength(1);
+  });
+});
+
+describe("createReport — location coordinates are validated server-side", () => {
+  function formWithLocation(loc: Record<string, unknown>) {
+    return reportForm({
+      location: JSON.stringify({
+        displayName: "RTC Bus Stand, Narasaraopet",
+        state: "Andhra Pradesh",
+        district: "Palnadu",
+        constituency: "Narasaraopet",
+        area: "Narasaraopet Municipality",
+        ...loc,
+      }),
+    });
+  }
+
+  it("stores a valid GPS fix with its source and accuracy", async () => {
+    const result = await createReport(
+      { status: "idle" },
+      formWithLocation({ source: "gps", latitude: 16.2354, longitude: 80.0479, accuracy: 12.5 })
+    );
+
+    expect(result).toMatchObject({ status: "success" });
+    expect(db.report_locations).toEqual([
+      expect.objectContaining({ latitude: 16.2354, longitude: 80.0479, location_source: "gps", accuracy_meters: 12.5 }),
+    ]);
+  });
+
+  it("stores a map-pin or search selection as given, without accuracy", async () => {
+    await createReport({ status: "idle" }, formWithLocation({ source: "search", latitude: 16.24, longitude: 80.05 }));
+
+    const loc = db.report_locations[0];
+    expect(loc).toMatchObject({ latitude: 16.24, longitude: 80.05, location_source: "search" });
+    expect(loc.accuracy_meters ?? null).toBeNull();
+  });
+
+  it.each([
+    ["out-of-range latitude", { latitude: 123, longitude: 80.05 }],
+    ["out-of-range longitude", { latitude: 16.24, longitude: 200 }],
+    ["non-numeric values", { latitude: "16.24", longitude: "80.05" }],
+    ["only one coordinate", { latitude: 16.24 }],
+  ])("drops %s: null coordinates, source downgraded to manual, never (0, 0)", async (_label, coords) => {
+    const result = await createReport({ status: "idle" }, formWithLocation({ source: "gps", accuracy: 5, ...coords }));
+
+    expect(result).toMatchObject({ status: "success" });
+    const loc = db.report_locations[0];
+    expect(loc).toMatchObject({ latitude: null, longitude: null, location_source: "manual" });
+    expect(loc.accuracy_meters ?? null).toBeNull();
+  });
+
+  it("drops an invalid accuracy but keeps otherwise-valid GPS coordinates", async () => {
+    await createReport(
+      { status: "idle" },
+      formWithLocation({ source: "gps", latitude: 16.2354, longitude: 80.0479, accuracy: -3 })
+    );
+
+    const loc = db.report_locations[0];
+    expect(loc).toMatchObject({ latitude: 16.2354, longitude: 80.0479, location_source: "gps" });
+    expect(loc.accuracy_meters ?? null).toBeNull();
+  });
+
+  it("still routes and queues AI for a report without coordinates (manual jurisdiction only)", async () => {
+    const result = await createReport({ status: "idle" }, reportForm());
+
+    expect(result).toMatchObject({ status: "success", aiQueued: true });
+    expect(db.report_locations[0]).toMatchObject({ latitude: null, longitude: null, location_source: "manual" });
+    expect(db.report_assignments).toHaveLength(1);
+  });
+});
+
+describe("createReport — photo upload never leaves a stray report", () => {
+  /** A real JPEG signature followed by filler bytes. */
+  const jpegBytes = (size = 64) => {
+    const b = Buffer.alloc(size, 0);
+    b[0] = 0xff;
+    b[1] = 0xd8;
+    b[2] = 0xff;
+    return b;
+  };
+  const withPhoto = (bytes: Buffer, type = "image/jpeg", name = "evidence.jpg") => {
+    const fd = reportForm();
+    fd.set("photo", new File([new Uint8Array(bytes)], name, { type }));
+    return fd;
+  };
+  /** Every record a submission can create — all must stay empty on failure. */
+  const nothingCreated = () => {
+    expect(db.reports).toHaveLength(0);
+    expect(db.report_locations).toHaveLength(0);
+    expect(db.report_assignments).toHaveLength(0);
+    expect(db.notifications).toHaveLength(0);
+    expect(db.report_media ?? []).toHaveLength(0);
+    expect(db.ai_analysis_jobs ?? []).toHaveLength(0);
+    expect(storage.objects.size).toBe(0);
+  };
+
+  it("oversized image: clear error, and no report, location, assignment, notification or storage object", async () => {
+    const result = await createReport({ status: "idle" }, withPhoto(jpegBytes(8 * 1024 * 1024 + 1)));
+
+    expect(result).toEqual({ status: "error", error: "Photo is too large (8MB max)." });
+    nothingCreated();
+  });
+
+  it("spoofed image (claims image/jpeg, content is text): rejected before anything is written", async () => {
+    const spoofed = Buffer.from("This is definitely not a JPEG — just plain text pretending to be one.");
+    const result = await createReport({ status: "idle" }, withPhoto(spoofed, "image/jpeg"));
+
+    expect(result).toEqual({ status: "error", error: "Please upload a JPEG, PNG, WEBP, or HEIC photo." });
+    nothingCreated();
+  });
+
+  it("disallowed declared type (e.g. a PDF): rejected before anything is written", async () => {
+    const result = await createReport({ status: "idle" }, withPhoto(jpegBytes(), "application/pdf", "evidence.pdf"));
+
+    expect(result).toMatchObject({ status: "error" });
+    nothingCreated();
+  });
+
+  it("valid image: report saved, photo stored under the report's path, media row recorded, citizen notified once", async () => {
+    const result = await createReport({ status: "idle" }, withPhoto(jpegBytes()));
+
+    expect(result).toMatchObject({ status: "success" });
+    const reportId = db.reports[0].id as string;
+    expect(storage.objects.size).toBe(1);
+    const [path] = [...storage.objects.keys()];
+    expect(path).toMatch(new RegExp(`^${CITIZEN_ID}/${reportId}/[0-9a-f-]+\\.jpg$`));
+    expect(db.report_media).toEqual([
+      expect.objectContaining({ report_id: reportId, file_path: path, mime_type: "image/jpeg", file_type: "image", kind: "evidence" }),
+    ]);
+    expect(db.notifications.filter((n) => n.type === "report_created")).toHaveLength(1);
+    expect(db.report_assignments).toHaveLength(1);
+  });
+
+  it("no photo (optional): report saved and routed, nothing uploaded", async () => {
+    const result = await createReport({ status: "idle" }, reportForm());
+
+    expect(result).toMatchObject({ status: "success" });
+    expect(db.reports).toHaveLength(1);
+    expect(storage.objects.size).toBe(0);
+    expect(db.report_media ?? []).toHaveLength(0);
+    expect(db.notifications.filter((n) => n.type === "report_created")).toHaveLength(1);
+  });
+
+  it("an empty file part is treated as no photo", async () => {
+    const result = await createReport({ status: "idle" }, withPhoto(Buffer.alloc(0)));
+
+    expect(result).toMatchObject({ status: "success" });
+    expect(storage.objects.size).toBe(0);
+  });
+
+  it("storage upload failure: error returned and the partially created report is fully discarded", async () => {
+    storage.failUpload = true;
+    const result = await createReport({ status: "idle" }, withPhoto(jpegBytes()));
+
+    expect(result).toEqual({ status: "error", error: "Evidence upload failed. Please try again." });
+    nothingCreated();
+  });
+
+  it("report_media insert failure after upload: the uploaded object is removed and the report discarded", async () => {
+    forceNextError("report_media", "simulated insert failure");
+    const result = await createReport({ status: "idle" }, withPhoto(jpegBytes()));
+
+    expect(result).toEqual({ status: "error", error: "Evidence upload failed. Please try again." });
+    expect(db.reports).toHaveLength(0);
+    expect(db.report_locations).toHaveLength(0);
+    expect(db.notifications).toHaveLength(0);
+    expect(db.report_assignments).toHaveLength(0);
+    expect(storage.objects.size).toBe(0);
+  });
+
+  it("report insert failure: error, nothing uploaded and nothing else written", async () => {
+    forceNextError("reports", "simulated insert failure");
+    const result = await createReport({ status: "idle" }, withPhoto(jpegBytes()));
+
+    expect(result).toMatchObject({ status: "error" });
+    nothingCreated();
+  });
+
+  it("location insert failure: the report row is discarded and no photo is uploaded", async () => {
+    forceNextError("report_locations", "simulated insert failure");
+    const result = await createReport({ status: "idle" }, withPhoto(jpegBytes()));
+
+    expect(result).toMatchObject({ status: "error" });
+    expect(db.reports).toHaveLength(0);
+    expect(db.notifications).toHaveLength(0);
+    expect(db.report_assignments).toHaveLength(0);
+    expect(storage.objects.size).toBe(0);
+  });
+
+  it("a failed submission releases its idempotency key so the citizen can retry", async () => {
+    const release = vi.fn();
+    vi.mocked(beginIdempotentAction).mockImplementationOnce(async () => ({ kind: "run", commit: vi.fn(), release }));
+    storage.failUpload = true;
+
+    await createReport({ status: "idle" }, withPhoto(jpegBytes()));
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });
 

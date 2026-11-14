@@ -1,12 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { processDueReminders } from "@/lib/reminders";
+import { isAuthorizedCronRequest as isAuthorized } from "@/lib/cron-auth";
 
 /**
  * Real scheduler entry point for Phase 4 (Step 10). Deliberately a plain,
  * idempotent HTTP endpoint rather than any in-process timer — see
  * src/lib/reminders.ts for why repeated/concurrent calls are safe.
- * vercel.json schedules Vercel Cron to call this route every 5 minutes when
+ * vercel.json schedules Vercel Cron to call this route once a day (00:00 UTC
+ * — the Vercel Hobby plan's cron limit; raise the frequency on Pro) when
  * deployed on Vercel; any other scheduler can drive it the same way — a
  * Supabase pg_cron job calling out via pg_net, a system cron + curl, or a
  * manual authorized call all work identically. In a non-Vercel deployment
@@ -17,6 +19,8 @@ import { processDueReminders } from "@/lib/reminders";
  * pattern for Vercel Cron and for hitting this from any other scheduler.
  * If CRON_SECRET isn't configured, every request is refused — fails closed,
  * never silently open.
+ * The constant-time check lives in src/lib/cron-auth.ts (shared with
+ * /api/cron/ai-jobs), unchanged.
  */
 async function handleCronRequest(request: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
@@ -27,8 +31,7 @@ async function handleCronRequest(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const authHeader = request.headers.get("authorization");
-  if (authHeader !== `Bearer ${secret}`) {
+  if (!isAuthorized(request.headers.get("authorization"), secret)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 

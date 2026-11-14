@@ -9,7 +9,7 @@ import { confirmSameIncident, IncidentAIUnavailableError } from "./incident-ai-c
  * (src/lib/duplicate-detection.ts) — an incident is a longer-lived,
  * real-world physical problem that citizens can plausibly keep re-reporting
  * for weeks, not just the same day or two. */
-const INCIDENT_WINDOW_DAYS = 30;
+export const INCIDENT_WINDOW_DAYS = 30;
 const INCIDENT_NEARBY_METERS = 500;
 
 /** Below this deterministic score, two reports aren't even worth recording
@@ -26,7 +26,7 @@ const STRONG_MATCH_THRESHOLD = 0.85;
 /** Gemini's own confidence must clear this bar for its "yes" to count —
  * never blindly trust a low-confidence AI "yes" (spec §6: never fabricate
  * AI confidence, never treat an unsure answer as a confirmation). */
-const AI_CONFIRMATION_MIN_CONFIDENCE = 0.6;
+export const AI_CONFIRMATION_MIN_CONFIDENCE = 0.6;
 
 export type IncidentRelationshipType = "primary" | "duplicate" | "related" | "supporting" | "candidate";
 export type IncidentDetectionMethod = "rule_based" | "ai_confirmed";
@@ -42,6 +42,11 @@ export interface IncidentMatch {
   relationshipType: IncidentRelationshipType;
   detectionMethod: IncidentDetectionMethod;
   reason: string;
+  /** AI-2 defer mode: this is an ambiguous-band match whose Gemini
+   * confirmation was NOT attempted inline. It is returned exactly like the
+   * "Gemini unavailable" outcome ("candidate", rule_based); the caller
+   * queues a background confirmation (src/lib/incident-jobs.ts). */
+  deferredConfirmation?: boolean;
 }
 
 interface CandidateRow {
@@ -109,7 +114,14 @@ export async function findIncidentMatch(
      * reused as one more corroborating signal (spec §3 signal 5) rather
      * than recomputed independently. */
     existingDuplicateCandidate?: { reportId: string; relationType: "duplicate" | "related" } | null;
-  }
+  },
+  options: {
+    /** "inline" (default, unchanged): one Gemini call for an ambiguous
+     * match. "defer" (AI-2, used by report submission): no Gemini call —
+     * an ambiguous match is returned as the honest "candidate" outcome with
+     * deferredConfirmation=true, for a background job to confirm later. */
+    aiConfirmation?: "inline" | "defer";
+  } = {}
 ): Promise<IncidentMatch | null> {
   const since = new Date(Date.now() - INCIDENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
@@ -228,6 +240,20 @@ export async function findIncidentMatch(
       relationshipType: best.score >= STRONG_MATCH_THRESHOLD ? "duplicate" : "related",
       detectionMethod: "rule_based",
       reason,
+    };
+  }
+
+  // Ambiguous band, defer mode (AI-2): no network call during submission.
+  // Same result as "Gemini unavailable" below, flagged for a background
+  // confirmation of this single best candidate.
+  if (options.aiConfirmation === "defer") {
+    return {
+      reportId: best.reportId,
+      score: best.score,
+      relationshipType: "candidate",
+      detectionMethod: "rule_based",
+      reason,
+      deferredConfirmation: true,
     };
   }
 

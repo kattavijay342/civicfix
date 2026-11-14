@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { TEST_GOVERNMENT, TEST_DEPARTMENT_INCHARGE } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { createGovernmentDashboardFixture } from "./government-dashboard-fixture";
 
 /**
  * Phase 6E — Government Operations & Civic Performance Intelligence E2E.
@@ -24,26 +25,33 @@ async function signIn(page: import("@playwright/test").Page, email: string, pass
 
 test.describe("Government dashboard (Phase 6E)", () => {
   test("loads with real sections, honest SLA messaging, and no fabricated data", async ({ page }) => {
-    await signIn(page, TEST_GOVERNMENT.email, TEST_GOVERNMENT.password);
-    await page.goto("/government");
+    // The analytics sections render only for a jurisdiction that has issues,
+    // so this test brings its own: an isolated government user + reports.
+    const fixture = await createGovernmentDashboardFixture("sections");
+    try {
+      await signIn(page, fixture.email, fixture.password);
+      await page.goto("/government");
 
-    await expect(page.getByRole("heading", { name: "Area Overview" })).toBeVisible({ timeout: 15_000 });
-    // G5 replaced Phase 6E's "Needs Attention" panel with the Action
-    // Required command center (e2e/g5-action-required.spec.ts).
-    await expect(page.getByRole("heading", { name: "Action Required", exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Issue Aging" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Category Trends" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Workload Distribution" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Department Trend" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Follow-up Center" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Resolution Quality" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Area Overview" })).toBeVisible({ timeout: 15_000 });
+      // G5 replaced Phase 6E's "Needs Attention" panel with the Action
+      // Required command center (e2e/g5-action-required.spec.ts).
+      await expect(page.getByRole("heading", { name: "Action Required", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Issue Aging" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Category Trends" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Workload Distribution" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Department Trend" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Follow-up Center" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Resolution Quality" })).toBeVisible();
 
-    // The fabricated-SLA bug fix — never a fake compliance percentage.
-    await expect(page.getByText("On-time resolution data unavailable — no configured SLA.")).toBeVisible();
-    await expect(page.getByText(/\d+% of resolved issues within their configured SLA/)).toHaveCount(0);
+      // The fabricated-SLA bug fix — never a fake compliance percentage.
+      await expect(page.getByText("On-time resolution data unavailable — no configured SLA.")).toBeVisible();
+      await expect(page.getByText(/\d+% of resolved issues within their configured SLA/)).toHaveCount(0);
 
-    // Never a political ranking.
-    await expect(page.getByText(/Best Department|Worst Department|Top Performing Department/i)).toHaveCount(0);
+      // Never a political ranking.
+      await expect(page.getByText(/Best Department|Worst Department|Top Performing Department/i)).toHaveCount(0);
+    } finally {
+      await fixture.cleanup();
+    }
   });
 
   test("Action Required queue tiles link to real filtered queues", async ({ page }) => {
@@ -56,13 +64,18 @@ test.describe("Government dashboard (Phase 6E)", () => {
   });
 
   test("the Department Trend 7/30/90 toggle switches views client-side with no page reload", async ({ page }) => {
-    await signIn(page, TEST_GOVERNMENT.email, TEST_GOVERNMENT.password);
-    await page.goto("/government");
-    await expect(page.getByRole("heading", { name: "Department Trend" })).toBeVisible({ timeout: 15_000 });
+    const fixture = await createGovernmentDashboardFixture("trend");
+    try {
+      await signIn(page, fixture.email, fixture.password);
+      await page.goto("/government");
+      await expect(page.getByRole("heading", { name: "Department Trend" })).toBeVisible({ timeout: 15_000 });
 
-    const thirtyDayButton = page.getByRole("button", { name: "30 days" });
-    await thirtyDayButton.click();
-    await expect(thirtyDayButton).toHaveAttribute("aria-pressed", "true");
+      const thirtyDayButton = page.getByRole("button", { name: "30 days" });
+      await thirtyDayButton.click();
+      await expect(thirtyDayButton).toHaveAttribute("aria-pressed", "true");
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });
 

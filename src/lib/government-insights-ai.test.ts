@@ -28,8 +28,21 @@ describe("buildGovernmentMetricsSnapshot", () => {
     });
     expect(metrics.total_issues).toBe(10);
     expect(metrics.resolved).toBe(6);
-    expect(metrics.critical).toBe(2);
+    expect(metrics.critical_open).toBe(2);
+    expect(metrics.critical).toBeUndefined();
     expect(metrics.resolution_rate).toBe(60);
+  });
+
+  it("G8: omits critical_open when the open-critical count is unavailable, rather than fabricating one", () => {
+    const metrics = buildGovernmentMetricsSnapshot({
+      overview: { totalIssues: 4, resolved: 1, pending: 3, critical: null, resolutionRate: 25 },
+      aging: null,
+      quality: null,
+      categories: [],
+      workload: [],
+    });
+    expect("critical_open" in metrics).toBe(false);
+    expect("critical" in metrics).toBe(false);
   });
 
   it("omits aging/quality keys entirely when those aggregates are unavailable, rather than fabricating zeros", () => {

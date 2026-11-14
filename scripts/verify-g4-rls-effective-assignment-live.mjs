@@ -2,18 +2,28 @@
 // effective assignment). Every access check is a real signed-in Data API
 // query, so Postgres RLS alone decides the outcome.
 //
-// Part 1 (read-only): evaluates migration 0016's predicate — with SQL NULL
-// semantics — over EVERY current live in-charge assignment, so no
-// legitimate access is lost when it is applied. Also checks, through
-// incharge1's real session, that each of its assignments is readable.
+// Part 1: evaluates migration 0016's predicate — with SQL NULL semantics —
+// over EVERY current live in-charge assignment, so no legitimate access is
+// lost when it is applied. Also checks, through incharge1's real session,
+// that each of its assignments is readable. It first creates ONE disposable
+// live assignment for incharge1 (deleted before exit) so this always has
+// something to verify, even on a clean database; existing assignments are
+// only read.
 // Part 2: ALLOW/DENY matrix on disposable fixtures (one report per stale
 // scenario, throwaway @test.civicfix.local users), all deleted before exit.
 // Existing reports/incidents are only READ, never written. Sends NO email.
 //
 // Before 0016 is applied the stale-scenario DENY tests are expected to FAIL
 // (that is the gap 0016 closes); after, everything must PASS.
-// Usage: node --env-file=.env.local scripts/verify-g4-rls-effective-assignment-live.mjs
+// Usage: node --env-file=.env.g8-local scripts/verify-g4-rls-effective-assignment-live.mjs
 import { createClient } from "@supabase/supabase-js";
+import { exitUnlessLocalSupabaseEnv } from "./lib/local-supabase-guard.mjs";
+
+// LOCAL Supabase only (scripts/lib/local-supabase-guard.mjs): loads .env.g8-local
+// if the env isn't set (never .env.local) and aborts before any client exists
+// unless the URL is http://127.0.0.1:54321 / http://localhost:54321 with the
+// local CLI's anon + service-role keys.
+exitUnlessLocalSupabaseEnv();
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -109,7 +119,30 @@ try {
   const roads = departments.find((d) => d.name === "Roads & Infrastructure");
   const water = departments.find((d) => d.name === "Water Supply");
 
-  // ---- Part 1: existing live assignments (read-only) ----
+  // ---- Part 1 fixture: one live assignment for incharge1 ----
+  // Makes Part 1 self-contained on any database (e.g. a clean local stack with
+  // no pre-existing assignments): exactly one disposable report, routed to
+  // Roads & Infrastructure in Narasaraopet and assigned to incharge1 — its
+  // department and scope — via the same routedReport() helper as Part 2, so
+  // it is in cleanupReports and deleted before exit. Part 1's checks below
+  // are unchanged; they now always have at least this assignment to verify.
+  const liveFixtureReporter = await throwawayUser("part1-reporter");
+  const liveFixtureId = await routedReport(liveFixtureReporter.id, roads.id, incharge1Auth.id, "part1 live assignment for incharge1");
+  {
+    const [{ data: p }, { data: r }, { data: l }, { data: a }] = await Promise.all([
+      admin.from("profiles").select("role, department_id").eq("id", incharge1Auth.id).single(),
+      admin.from("department_incharges").select("*").eq("profile_id", incharge1Auth.id).eq("department_id", roads.id).maybeSingle(),
+      admin.from("report_locations").select("state, district, constituency, area").eq("report_id", liveFixtureId).maybeSingle(),
+      admin.from("report_assignments").select("department_id, incharge_id").eq("report_id", liveFixtureId).maybeSingle(),
+    ]);
+    record(
+      "SETUP - Part 1 fixture is a live, effective assignment (incharge1 active in Roads, report in its scope, 0016 predicate true)",
+      !!a && a.incharge_id === incharge1Auth.id && r?.is_active === true && sqlPredicate(p, a, r, l),
+      `active=${r?.is_active} assignedTo=${a?.incharge_id === incharge1Auth.id ? "incharge1" : "other"}`
+    );
+  }
+
+  // ---- Part 1: live assignments ----
   const { data: live } = await admin.from("report_assignments").select("report_id, department_id, incharge_id").not("incharge_id", "is", null);
   let kept = 0;
   for (const a of live) {

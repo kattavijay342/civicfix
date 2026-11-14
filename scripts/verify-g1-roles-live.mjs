@@ -4,8 +4,15 @@
 // unconfirmed/unused and deleted before it exits. Sends NO email: the
 // invitation check uses generateLink(), which creates the link without
 // mailing it.
-// Usage: node --env-file=.env.local scripts/verify-g1-roles-live.mjs
+// Usage: node --env-file=.env.g8-local scripts/verify-g1-roles-live.mjs
 import { createClient } from "@supabase/supabase-js";
+import { exitUnlessLocalSupabaseEnv } from "./lib/local-supabase-guard.mjs";
+
+// LOCAL Supabase only (scripts/lib/local-supabase-guard.mjs): loads .env.g8-local
+// if the env isn't set (never .env.local) and aborts before any client exists
+// unless the URL is http://127.0.0.1:54321 / http://localhost:54321 with the
+// local CLI's anon + service-role keys.
+exitUnlessLocalSupabaseEnv();
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -123,7 +130,13 @@ try {
   // ---------------------------------------------------------------
   // E. Invitation mechanism (no email sent)
   // ---------------------------------------------------------------
-  for (const origin of ["http://localhost:3000", "https://civicfix-sbte.vercel.app"]) {
+  // This script only ever runs against LOCAL Supabase (guarded above), so it
+  // validates the redirect target the app itself builds outside production:
+  // getAuthRedirectOrigin() (src/lib/auth-redirect.ts) -> http://localhost:3000,
+  // which the local auth allow-list (supabase/config.toml
+  // additional_redirect_urls) permits. The production origin is on the HOSTED
+  // project's allow-list only and is never exercised from a local run.
+  for (const origin of ["http://localhost:3000"]) {
     const redirectTo = `${origin}/auth/accept-invite`;
     const { data: link, error: linkErr } = await admin.auth.admin.generateLink({
       type: "invite",
@@ -154,6 +167,27 @@ try {
       const { error: pwErr } = sessErr ? { error: sessErr } : await invitee.auth.updateUser({ password: `${PASSWORD}-inv` });
       record(`E. invite link yields a session and the invitee sets their own password (${origin})`, !sessErr && !pwErr, sessErr?.message ?? pwErr?.message ?? "");
     }
+  }
+
+  // Allow-list enforcement: a redirect NOT on the allow-list must never be
+  // honored. `.invalid` can never resolve, and the link is fetched with
+  // redirect: "manual", so nothing outside the local stack is contacted.
+  {
+    const deniedRedirect = "https://redirect-not-allowed.invalid/auth/accept-invite";
+    const { data: link, error: linkErr } = await admin.auth.admin.generateLink({
+      type: "invite",
+      email: await throwawayEmail("invite-denied"),
+      options: { redirectTo: deniedRedirect },
+    });
+    if (linkErr) throw new Error(`generateLink failed: ${linkErr.message}`);
+    cleanup.push(link.user.id);
+    const res = await fetch(link.properties.action_link, { redirect: "manual" });
+    const location = res.headers.get("location") ?? "";
+    record(
+      "E. Supabase refuses a redirect outside the Redirect URLs allow-list",
+      !!location && !location.startsWith("https://redirect-not-allowed.invalid"),
+      location ? `redirected to ${location.split("#")[0]}` : `status ${res.status}`
+    );
   }
 } catch (err) {
   record("script error", false, err.message);

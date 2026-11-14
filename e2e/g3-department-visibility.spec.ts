@@ -2,6 +2,7 @@ import { test, expect, type Browser } from "@playwright/test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { TEST_CITIZEN, TEST_DEPARTMENT_INCHARGE, TEST_GOVERNMENT } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * Phase G3 — department visibility in a real browser, independent of
@@ -15,11 +16,9 @@ import { AUTH_STATE_PATH } from "./global-setup";
  * row (never routable): Roads/Tenali and Water Supply/Narasaraopet.
  */
 
-try {
-  process.loadEnvFile(".env.local");
-} catch {
-  // Env already provided by the shell/CI.
-}
+// LOCAL Supabase only (e2e/local-supabase-guard.ts): loads .env.g8-local, never
+// .env.local, and aborts this file for any non-local URL or hosted key.
+requireLocalSupabaseEnv();
 
 const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const TITLE = `G3 visibility pothole near RTC Bus Stand ${RUN_ID}`;

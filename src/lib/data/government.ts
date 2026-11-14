@@ -1,4 +1,6 @@
 import "server-only";
+import { cache } from "react";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
@@ -19,6 +21,19 @@ import type {
   ProblemCategory,
 } from "@/lib/types";
 import { categoryFromDb } from "@/lib/db-enums";
+import {
+  compareCategoryPeriods,
+  mapAreaBreakdownRows,
+  type AreaBreakdownRow,
+  type AreaBreakdownRowRaw,
+  type CategoryCountRow,
+  type CategoryPeriodComparison,
+} from "@/lib/government-analytics";
+
+/** Only `.rpc()` is needed by the G8 loaders below — narrowed so unit tests
+ * can pass a fake (src/lib/data/government.test.ts) while production passes
+ * the caller's own RLS-scoped session client. */
+type RpcClient = Pick<SupabaseClient, "rpc">;
 
 /**
  * Reports visible to the calling government user. RLS
@@ -75,8 +90,13 @@ export async function getGovernmentIssuesPage(page: number, filters?: IssueListF
 export interface AreaOverview {
   totalIssues: number;
   resolved: number;
+  /** Every non-resolved status, reopened included (total − resolved). */
   pending: number;
-  critical: number;
+  /** G8 — OPEN (not resolved) critical-priority issues, from
+   * get_insight_metrics().critical_unresolved. null when that RPC failed:
+   * never falls back to get_area_overview()'s all-time critical count,
+   * which includes resolved reports. */
+  critical: number | null;
   resolutionRate: number;
 }
 
@@ -141,32 +161,48 @@ interface AreaConcentrationRow {
  * `reports_select` RLS policy still does all the jurisdiction/ownership
  * filtering, exactly as it does for ordinary table reads.
  */
-export async function getAreaOverview(): Promise<AreaOverview> {
-  const supabase = await createClient();
-  const { data: raw, error } = await supabase.rpc("get_area_overview").maybeSingle();
+export async function loadInsightMetrics(client: RpcClient): Promise<InsightMetricsRow | null> {
+  const { data, error } = await client.rpc("get_insight_metrics").maybeSingle();
+  if (error) console.error("get_insight_metrics failed", error);
+  return error ? null : ((data as unknown as InsightMetricsRow | null) ?? null);
+}
+
+/** One get_insight_metrics() call per request, shared by the overview's
+ * open-critical KPI and getAIInsights() below (React request cache). */
+const getInsightMetricsRow = cache(async () => loadInsightMetrics(await createClient()));
+
+export async function loadAreaOverview(client: RpcClient, insightMetrics: InsightMetricsRow | null): Promise<AreaOverview> {
+  const { data: raw, error } = await client.rpc("get_area_overview").maybeSingle();
   const data = raw as unknown as AreaOverviewRow | null;
+  const critical = insightMetrics ? Number(insightMetrics.critical_unresolved) : null;
 
   if (error || !data) {
     console.error("get_area_overview failed", error);
-    return { totalIssues: 0, resolved: 0, pending: 0, critical: 0, resolutionRate: 0 };
+    return { totalIssues: 0, resolved: 0, pending: 0, critical, resolutionRate: 0 };
   }
 
   return {
     totalIssues: Number(data.total_issues),
     resolved: Number(data.resolved),
     pending: Number(data.pending),
-    critical: Number(data.critical),
+    // get_area_overview().critical counts resolved criticals too — G8's
+    // Critical KPI is open criticals only (see AreaOverview.critical).
+    critical,
     resolutionRate: Number(data.resolution_rate),
   };
+}
+
+export async function getAreaOverview(): Promise<AreaOverview> {
+  const [supabase, insightMetrics] = await Promise.all([createClient(), getInsightMetricsRow()]);
+  return loadAreaOverview(supabase, insightMetrics);
 }
 
 /**
  * Backed by get_department_performance() (same migration as above) instead
  * of pulling every visible report + assignment + resolution row into Node.
  */
-export async function getDepartmentPerformance(): Promise<DepartmentPerformance[]> {
-  const supabase = await createClient();
-  const { data: raw, error } = await supabase.rpc("get_department_performance");
+export async function loadDepartmentPerformance(client: RpcClient): Promise<DepartmentPerformance[]> {
+  const { data: raw, error } = await client.rpc("get_department_performance");
   const data = raw as unknown as DepartmentPerformanceRow[] | null;
 
   if (error) {
@@ -174,24 +210,30 @@ export async function getDepartmentPerformance(): Promise<DepartmentPerformance[
     return [];
   }
 
-  return (data ?? []).map((row) => ({
-    name: row.name,
-    resolutionRate: Number(row.resolution_rate),
-    totalIssues: Number(row.total_issues),
-    resolvedIssues: Number(row.resolved_issues),
-    pendingIssues: Number(row.pending_issues),
-    // Phase 6E — no real SLA/due date exists anywhere in this product
-    // (see the AreaOverviewRow/DepartmentPerformanceRow comment above);
-    // null tells every UI consumer to render the honest "no configured
-    // SLA" state instead of a fabricated compliance percentage.
-    onTimeRate: null,
-    avgResolutionDays: Number(row.avg_resolution_days),
-    // Period-over-period change isn't tracked yet — a real trend needs a
-    // second, comparable time window's worth of the same aggregate, which
-    // is a larger addition than this pass's scope. Left at 0 (as before)
-    // rather than fabricated.
-    trend: 0,
-  }));
+  return (data ?? []).map((row) => {
+    const resolvedIssues = Number(row.resolved_issues);
+    return {
+      name: row.name,
+      resolutionRate: Number(row.resolution_rate),
+      totalIssues: Number(row.total_issues),
+      resolvedIssues,
+      pendingIssues: Number(row.pending_issues),
+      // Phase 6E — no real SLA/due date exists anywhere in this product
+      // (see the AreaOverviewRow/DepartmentPerformanceRow comment above);
+      // null tells every UI consumer to render the honest "no configured
+      // SLA" state instead of a fabricated compliance percentage.
+      onTimeRate: null,
+      // The SQL returns 0 when there is nothing to average; G8 shows "—".
+      avgResolutionDays: resolvedIssues === 0 ? null : Number(row.avg_resolution_days),
+      // G8 — no period-over-period field at all: nothing here compares two
+      // real windows of this aggregate, so none is shown (previously a
+      // hardcoded 0 rendered as "+0%").
+    };
+  });
+}
+
+export async function getDepartmentPerformance(): Promise<DepartmentPerformance[]> {
+  return loadDepartmentPerformance(await createClient());
 }
 
 /** Deterministic, real-data-derived insights (Step 16). No LLM call here —
@@ -201,11 +243,10 @@ export async function getDepartmentPerformance(): Promise<DepartmentPerformance[
  * — only the human-readable copy/tone is composed here. */
 export async function getAIInsights(): Promise<AIInsight[]> {
   const supabase = await createClient();
-  const [metricsRes, concentrationRes] = await Promise.all([
-    supabase.rpc("get_insight_metrics").maybeSingle(),
+  const [metrics, concentrationRes] = await Promise.all([
+    getInsightMetricsRow(),
     supabase.rpc("get_area_concentration").maybeSingle(),
   ]);
-  const metrics = metricsRes.data as unknown as InsightMetricsRow | null;
   const concentration = concentrationRes.data as unknown as AreaConcentrationRow | null;
   if (concentrationRes.error) {
     // Independent of get_insight_metrics — a failure here (e.g. migration
@@ -214,7 +255,7 @@ export async function getAIInsights(): Promise<AIInsight[]> {
   }
 
   const insights: AIInsight[] = [];
-  if (metricsRes.error || !metrics || Number(metrics.total_reports) === 0) return insights;
+  if (!metrics || Number(metrics.total_reports) === 0) return insights;
 
   const totalReports = Number(metrics.total_reports);
   const topCategoryCount = Number(metrics.top_category_count);
@@ -495,29 +536,68 @@ export interface CategoryTrend {
   count: number;
 }
 
-interface CategoryTrendRow {
-  category: string;
-  report_count: number;
+export interface CategoryTrendsWithComparison {
+  /** Per-category counts for the last `days` days — real database records
+   * only, no predictive claims (spec §16); also fed to the AI snapshot.
+   * null (distinct from a genuine empty array) when the RPC itself is
+   * unreachable, so the UI never asserts "zero reports" when it doesn't
+   * actually know. */
+  current: CategoryTrend[] | null;
+  /** Last `days` days vs the `days` before that; null when either RPC failed. */
+  comparison: CategoryPeriodComparison[] | null;
 }
 
-/** Per-category report counts within a trailing window (default 30 days) —
- * real database records only, no predictive claims (spec §16). Returns
- * null (distinct from a genuine empty array) when the RPC itself is
- * unreachable, so the UI can tell "no data available" apart from "zero
- * reports in this period" instead of asserting the latter when it doesn't
- * actually know. */
-export async function getCategoryTrends(days = 30): Promise<CategoryTrend[] | null> {
-  const supabase = await createClient();
-  const { data: raw, error } = await supabase.rpc("get_category_trends", { p_days: days });
-  if (error) {
-    console.error("get_category_trends failed", error);
-    return null;
+/**
+ * G8 — category counts for the last `days` days plus the previous `days`
+ * days, from two calls of the existing get_category_trends() (0013): no new
+ * SQL. previous = count(last 2×days) − count(last days); see
+ * compareCategoryPeriods (src/lib/government-analytics.ts).
+ */
+export async function loadCategoryTrendsWithComparison(client: RpcClient, days: number): Promise<CategoryTrendsWithComparison> {
+  const [currentRes, doubleRes] = await Promise.all([
+    client.rpc("get_category_trends", { p_days: days }),
+    client.rpc("get_category_trends", { p_days: days * 2 }),
+  ]);
+  if (currentRes.error) {
+    console.error(`get_category_trends(${days}) failed`, currentRes.error);
+    return { current: null, comparison: null };
   }
-  const data = raw as unknown as CategoryTrendRow[] | null;
-  return (data ?? []).map((row) => ({
+  const currentRows = (currentRes.data as unknown as CategoryCountRow[] | null) ?? [];
+  const current = currentRows.map((row) => ({
     category: categoryFromDb[row.category] ?? (row.category as ProblemCategory),
     count: Number(row.report_count),
   }));
+  if (doubleRes.error) {
+    console.error(`get_category_trends(${days * 2}) failed`, doubleRes.error);
+    return { current, comparison: null };
+  }
+  const doubleRows = (doubleRes.data as unknown as CategoryCountRow[] | null) ?? [];
+  return { current, comparison: compareCategoryPeriods(currentRows, doubleRows) };
+}
+
+export async function getCategoryTrendsWithComparison(days = 30): Promise<CategoryTrendsWithComparison> {
+  return loadCategoryTrendsWithComparison(await createClient(), days);
+}
+
+/**
+ * G8 — per-location issue counts from get_area_breakdown()
+ * (supabase/migrations/0018_g8_area_breakdown.sql): security invoker, so the
+ * caller's own reports_select / report_locations_select RLS decides which
+ * reports are counted at all. Returns null (never zeros) when the RPC is
+ * unreachable — e.g. before migration 0018 is applied — so the UI says
+ * "unavailable" instead of asserting there are no issues.
+ */
+export async function loadAreaBreakdown(client: RpcClient): Promise<AreaBreakdownRow[] | null> {
+  const { data, error } = await client.rpc("get_area_breakdown");
+  if (error) {
+    console.error("get_area_breakdown failed", error);
+    return null;
+  }
+  return mapAreaBreakdownRows((data as unknown as AreaBreakdownRowRaw[] | null) ?? []);
+}
+
+export async function getAreaBreakdown(): Promise<AreaBreakdownRow[] | null> {
+  return loadAreaBreakdown(await createClient());
 }
 
 // Phase 6E's getNeedsAttention()/getActionCenterCounts() were superseded by

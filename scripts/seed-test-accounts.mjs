@@ -1,12 +1,23 @@
 // One-off local dev helper: creates confirmed test accounts across all
 // four roles for manual/E2E testing, and verifies DB connectivity.
 // Usage: node --env-file=.env.local scripts/seed-test-accounts.mjs
+//
+// --local (G8): LOCAL Docker Supabase only —
+//   node --env-file=.env.g8-local scripts/seed-test-accounts.mjs --local
+// Aborts unless NEXT_PUBLIC_SUPABASE_URL is http://127.0.0.1:54321 or
+// http://localhost:54321, never touches the real admin account, and also
+// seeds the local-only extras: citizen2 and gov2 (a government user in a
+// second jurisdiction, used for cross-jurisdiction isolation checks).
 import { createClient } from "@supabase/supabase-js";
+import { exitUnlessLocalSupabaseEnv } from "./lib/local-supabase-guard.mjs";
+
+const LOCAL_ONLY = process.argv.includes("--local");
+if (LOCAL_ONLY) exitUnlessLocalSupabaseEnv({ requireAnon: false });
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!url || !serviceKey) {
-  console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env.local");
+  console.error(`Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in ${LOCAL_ONLY ? ".env.g8-local" : ".env.local"}`);
   process.exit(1);
 }
 
@@ -18,6 +29,13 @@ const JURISDICTION = {
   district: "Palnadu",
   constituency: "Narasaraopet",
   area: "Narasaraopet Municipality",
+};
+// --local only: a second jurisdiction no existing G1–G7 fixture uses.
+const JURISDICTION_B = {
+  state: "Andhra Pradesh",
+  district: "Guntur",
+  constituency: "Guntur West",
+  area: "Arundelpet",
 };
 
 async function upsertConfirmedUser(email, fullName, mobile) {
@@ -49,8 +67,10 @@ async function main() {
 
   console.log("\n2. Confirming the real account and promoting to admin...");
   const { data: allUsers } = await admin.auth.admin.listUsers();
-  const realUser = allUsers?.users.find((u) => u.email === "siraj.vambara@cannitix.ai");
-  if (realUser) {
+  const realUser = LOCAL_ONLY ? null : allUsers?.users.find((u) => u.email === "siraj.vambara@cannitix.ai");
+  if (LOCAL_ONLY) {
+    console.log("   (--local: real account never touched — skipping)");
+  } else if (realUser) {
     if (!realUser.email_confirmed_at) {
       await admin.auth.admin.updateUserById(realUser.id, { email_confirm: true });
       console.log("   confirmed siraj.vambara@cannitix.ai");
@@ -94,6 +114,18 @@ async function main() {
     { onConflict: "department_id,profile_id" }
   );
   console.log("   incharge1 -> department_incharge, Roads & Infrastructure,", JSON.stringify(JURISDICTION));
+
+  if (LOCAL_ONLY) {
+    console.log("\n5. Local-only extras...");
+    // Same identity scripts/verify-rls.mjs creates on demand.
+    await upsertConfirmedUser("citizen2@test.civicfix.local", "Test Citizen Two", "+919876500099");
+    const gov2Id = await upsertConfirmedUser("gov2@test.civicfix.local", "Test Government User B", "+919876500004");
+    await admin
+      .from("profiles")
+      .update({ role: "government", ...jurisdictionColumns(JURISDICTION_B) })
+      .eq("id", gov2Id);
+    console.log("   gov2 -> government,", JSON.stringify(JURISDICTION_B));
+  }
 
   console.log("\nDone. Test credentials (password for all: " + TEST_PASSWORD + "):");
   console.log("  citizen1@test.civicfix.local  (id " + citizenId + ")");

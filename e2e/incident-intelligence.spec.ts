@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { TEST_GOVERNMENT } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { createGovernmentDashboardFixture } from "./government-dashboard-fixture";
 
 /**
  * Civic Incident Intelligence E2E. Kept independent of Gemini (like
@@ -25,9 +26,16 @@ async function signIn(page: import("@playwright/test").Page, email: string, pass
 
 test.describe("Government dashboard — Civic Incidents section", () => {
   test("shows a Civic Incidents section without crashing", async ({ page }) => {
-    await signIn(page, TEST_GOVERNMENT.email, TEST_GOVERNMENT.password);
-    await page.goto("/government");
-    await expect(page.getByRole("heading", { name: "Civic Incidents", exact: true })).toBeVisible({ timeout: 15_000 });
+    // The section renders only for a jurisdiction with issues — seed an
+    // isolated government user + reports instead of relying on existing data.
+    const fixture = await createGovernmentDashboardFixture("incidents");
+    try {
+      await signIn(page, fixture.email, fixture.password);
+      await page.goto("/government");
+      await expect(page.getByRole("heading", { name: "Civic Incidents", exact: true })).toBeVisible({ timeout: 15_000 });
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });
 

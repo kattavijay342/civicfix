@@ -196,11 +196,11 @@ export const sampleIssues: CivicIssue[] = [
 ];
 
 export const departmentPerformance: DepartmentPerformance[] = [
-  { name: "Roads", resolutionRate: 85, totalIssues: 40, resolvedIssues: 34, pendingIssues: 6, onTimeRate: 78, avgResolutionDays: 6.2, trend: 3 },
-  { name: "Sanitation", resolutionRate: 92, totalIssues: 28, resolvedIssues: 26, pendingIssues: 2, onTimeRate: 88, avgResolutionDays: 2.8, trend: 4 },
-  { name: "Water Supply", resolutionRate: 81, totalIssues: 22, resolvedIssues: 18, pendingIssues: 4, onTimeRate: 70, avgResolutionDays: 5.1, trend: -2 },
-  { name: "Drainage", resolutionRate: 87, totalIssues: 18, resolvedIssues: 16, pendingIssues: 2, onTimeRate: 80, avgResolutionDays: 4.4, trend: 1 },
-  { name: "Electrical", resolutionRate: 90, totalIssues: 20, resolvedIssues: 18, pendingIssues: 2, onTimeRate: 85, avgResolutionDays: 3.0, trend: 5 },
+  { name: "Roads", resolutionRate: 85, totalIssues: 40, resolvedIssues: 34, pendingIssues: 6, onTimeRate: 78, avgResolutionDays: 6.2 },
+  { name: "Sanitation", resolutionRate: 92, totalIssues: 28, resolvedIssues: 26, pendingIssues: 2, onTimeRate: 88, avgResolutionDays: 2.8 },
+  { name: "Water Supply", resolutionRate: 81, totalIssues: 22, resolvedIssues: 18, pendingIssues: 4, onTimeRate: 70, avgResolutionDays: 5.1 },
+  { name: "Drainage", resolutionRate: 87, totalIssues: 18, resolvedIssues: 16, pendingIssues: 2, onTimeRate: 80, avgResolutionDays: 4.4 },
+  { name: "Electrical", resolutionRate: 90, totalIssues: 20, resolvedIssues: 18, pendingIssues: 2, onTimeRate: 85, avgResolutionDays: 3.0 },
 ];
 
 export const pendingByPriority: PendingByPriority[] = [

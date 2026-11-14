@@ -22,8 +22,7 @@ export function IssueMapSection() {
         </Reveal>
 
         <p className="mt-4 text-center text-xs text-foreground-muted">
-          Sample issues shown for preview — a live map/geocoding provider can be connected behind
-          this layout later (see the Phase 2 report).
+          Sample issues shown for illustration — every real report and incident shows its exact location on a live map.
         </p>
       </div>
     </section>

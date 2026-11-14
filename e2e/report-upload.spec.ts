@@ -1,6 +1,8 @@
 import { test, expect, type Page } from "@playwright/test";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { tinyJpegBuffer, spoofedNotAnImageBuffer, oversizedJpegBuffer } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { assertLocalSupabase, requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * Phase 4 Step 10 — real browser file-upload E2E.
@@ -22,6 +24,28 @@ import { AUTH_STATE_PATH } from "./global-setup";
 // (src/lib/duplicate-detection.ts) from flagging one test's report as a
 // near-duplicate of another's, without disabling real duplicate detection.
 const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+// LOCAL-only service-role client (the guard rejects any hosted project),
+// used to prove what the database does — and doesn't — contain after each
+// submission, and to clean up this run's reports and storage objects.
+const SUPABASE_URL = requireLocalSupabaseEnv().url;
+let adminClient: SupabaseClient | null = null;
+function admin(): SupabaseClient {
+  adminClient ??= createClient(assertLocalSupabase(SUPABASE_URL), process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  return adminClient;
+}
+
+/** Reports whose description carries this run's id (every test's description does). */
+async function reportsForThisRun(descriptionPrefix = "E2E") {
+  const { data, error } = await admin()
+    .from("reports")
+    .select("id")
+    .ilike("description", `${descriptionPrefix}%${RUN_ID}%`);
+  if (error) throw error;
+  return data ?? [];
+}
 
 async function fillReportBasics(page: Page, description: string) {
   await page.goto("/report");
@@ -95,6 +119,19 @@ async function submitAndAwaitOutcome(page: Page): Promise<SubmitOutcome> {
 test.describe("Report creation — file upload", () => {
   test.use({ storageState: AUTH_STATE_PATH });
 
+  test.afterAll(async () => {
+    const reports = await reportsForThisRun();
+    if (reports.length) {
+      const ids = reports.map((r) => r.id);
+      const { data: media } = await admin().from("report_media").select("file_path").in("report_id", ids);
+      const paths = (media ?? []).map((m) => m.file_path as string);
+      if (paths.length) await admin().storage.from("report-media").remove(paths);
+      const { error } = await admin().from("reports").delete().in("id", ids);
+      if (error) throw error;
+    }
+    expect(await reportsForThisRun()).toHaveLength(0);
+  });
+
   test("uploads a valid image, creates the report, and the stored media is retrievable only via a signed URL", async ({
     page,
     request,
@@ -159,6 +196,8 @@ test.describe("Report creation — file upload", () => {
     expect(outcome).toBe("error");
     await expect(page.getByRole("alert").filter({ hasText: /too large/i })).toBeVisible();
     expect(page.url()).not.toMatch(/\/report\/analysis/);
+    // The rejected upload created nothing — no report row at all.
+    expect(await reportsForThisRun("E2E oversize test")).toHaveLength(0);
   });
 
   test("rejects a file whose content doesn't match its claimed image type (MIME spoofing protection)", async ({
@@ -182,6 +221,8 @@ test.describe("Report creation — file upload", () => {
     expect(outcome).toBe("error");
     await expect(page.getByRole("alert").filter({ hasText: /JPEG, PNG, WEBP/i })).toBeVisible();
     expect(page.url()).not.toMatch(/\/report\/analysis/);
+    // The rejected upload created nothing — no report row at all.
+    expect(await reportsForThisRun("E2E spoof test")).toHaveLength(0);
   });
 
   test("the photo picker never attaches a non-image file client-side", async ({ page }) => {

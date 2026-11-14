@@ -8,6 +8,16 @@ import { NextResponse, type NextRequest } from "next/server";
  * the `middleware` file convention to `proxy` (same behavior, new name/export).
  * See node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/proxy.md.
  */
+/** Areas that always require a session. Anonymous requests get a real 307
+ * to /sign-in here instead of a streamed in-page redirect. This is only a
+ * first gate — each page still enforces the exact role (requireRole) and
+ * RLS enforces data access. */
+const PROTECTED_PREFIXES = ["/dashboard", "/government", "/department", "/admin", "/notifications"];
+
+export function isProtectedPath(pathname: string): boolean {
+  return PROTECTED_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
 
@@ -31,7 +41,15 @@ export async function proxy(request: NextRequest) {
   );
 
   // Touching getUser() is what actually refreshes an expiring session.
-  await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user && isProtectedPath(request.nextUrl.pathname)) {
+    const redirect = NextResponse.redirect(new URL("/sign-in", request.url));
+    response.cookies.getAll().forEach((cookie) => redirect.cookies.set(cookie));
+    return redirect;
+  }
 
   return response;
 }

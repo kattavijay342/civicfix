@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { performLocationSearch } from "@/lib/location/search";
 import { getSessionProfile } from "@/lib/supabase/server";
+import { checkRateLimit, retryAfterMessage } from "@/lib/rate-limit";
 
 /**
  * A Route Handler (not a Server Action) specifically so the browser can
@@ -13,6 +14,16 @@ export async function GET(request: NextRequest) {
   const session = await getSessionProfile();
   if (!session) {
     return NextResponse.json({ status: "unavailable", reason: "Sign in to search for a location." }, { status: 401 });
+  }
+
+  // Per-user cap on the paid provider: debounced typing stays far below
+  // this, a scripted caller does not.
+  const rateLimit = await checkRateLimit(`location_search:${session.user.id}`, 120, 10 * 60);
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { status: "unavailable", reason: retryAfterMessage(rateLimit.retryAfterSeconds) },
+      { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } }
+    );
   }
 
   const query = request.nextUrl.searchParams.get("q") ?? "";

@@ -1,6 +1,5 @@
-import { test, expect } from "@playwright/test";
-import { TEST_GOVERNMENT } from "./fixtures";
-import { AUTH_STATE_PATH } from "./global-setup";
+import { test, expect, type Browser, type Page } from "@playwright/test";
+import { createResolutionFeedbackFixture, type ResolutionFeedbackFixture } from "./resolution-feedback-fixture";
 
 /**
  * Phase 6D — citizen resolution feedback / reopen E2E.
@@ -11,105 +10,112 @@ import { AUTH_STATE_PATH } from "./global-setup";
  * pattern verify-phase6c-live.mjs used for RLS/notification proofs — far
  * more reliable than orchestrating four role logins through the UI. These
  * specs cover what Playwright verifies best: real rendering/gating in a
- * real browser, without depending on Gemini or fragile shared fixtures.
+ * real browser, without depending on Gemini.
+ *
+ * Self-contained: every report and user this spec looks at is created by
+ * e2e/resolution-feedback-fixture.ts in beforeAll (isolated citizen, a
+ * second citizen, a government user in a synthetic jurisdiction, and a
+ * resolved / routed / duplicate-flagged report) and removed in afterAll —
+ * which Playwright runs even when a test fails. Nothing depends on data
+ * left over from earlier runs, so no test needs a "no data" skip.
  */
 
-const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+let fixture: ResolutionFeedbackFixture | null = null;
 
-test.describe("Resolution feedback — rendering and authorization (Phase 6D)", () => {
-  test.use({ storageState: AUTH_STATE_PATH });
+function requireFixture(): ResolutionFeedbackFixture {
+  if (!fixture) throw new Error("resolution-feedback fixture was not created");
+  return fixture;
+}
 
-  test("the resolution-feedback form never appears on a report that isn't resolved yet", async ({ page }) => {
-    // A freshly created report starts at REPORTED — no Gemini call needed
-    // to reach this state (the AI step is a separate, later action).
-    await page.goto("/report");
-    await page.locator("#description").fill(`E2E resolution-feedback gating test ${RUN_ID}`);
-    await page.getByRole("button", { name: "Road / Pothole" }).click();
-    await page.locator("#loc-state").selectOption("Andhra Pradesh");
-    await page.locator("#loc-district").selectOption("Palnadu");
-    await page.locator("#loc-constituency").selectOption("Gurazala");
-    await page.locator("#loc-area").fill(`E2E-Loc-${RUN_ID}`);
-    await page.locator("#loc-area").blur();
-    await expect(page.getByText("Location identified")).toBeVisible();
+async function signedInPage(browser: Browser, email: string, password: string): Promise<Page> {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto("/sign-in");
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.locator('button[type="submit"]', { hasText: "Sign In" }).click();
+  await page.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 30_000 });
+  return page;
+}
 
-    await page.getByRole("button", { name: "Continue to Review" }).click();
-    await expect(page.getByRole("heading", { name: "Review your report" })).toBeVisible();
-    await page.getByRole("button", { name: "Analyze with AI" }).click();
+async function openReport(page: Page, reportId: string) {
+  await page.goto(`/reports/${reportId}`);
+  // The report itself must actually render — an access-denied or not-found
+  // page would trivially "not show the form" and prove nothing.
+  await expect(page.getByRole("heading", { name: "Routing" })).toBeVisible({ timeout: 20_000 });
+}
 
-    // Whether AI succeeds or gracefully degrades (Gemini quota), the report
-    // itself is created and reachable — confirmed by either outcome's own
-    // real UI text, not asserted further here since AI's own behavior is
-    // covered by Phase 6A's own regression, not this spec.
-    await expect(
-      page.getByText(/Report saved|AI analysis is temporarily unavailable|Complaint Generated/i).first()
-    ).toBeVisible({ timeout: 20_000 });
+const FEEDBACK_QUESTION = "Was this issue actually resolved?";
 
-    await expect(page.getByText("Was this issue actually resolved?")).toHaveCount(0);
+test.describe.serial("Resolution feedback — rendering and authorization (Phase 6D)", () => {
+  test.beforeAll(async () => {
+    fixture = await createResolutionFeedbackFixture();
+  });
+
+  test.afterAll(async () => {
+    if (fixture) await fixture.cleanup();
+    fixture = null;
+  });
+
+  test("the reporter sees the resolution-feedback form on their own resolved report", async ({ browser }) => {
+    const fx = requireFixture();
+    const page = await signedInPage(browser, fx.citizen.email, fx.citizen.password);
+    await openReport(page, fx.reports.resolved);
+    await expect(page.getByText(FEEDBACK_QUESTION)).toBeVisible();
+    await page.context().close();
+  });
+
+  test("the resolution-feedback form never appears on a report that isn't resolved yet", async ({ browser }) => {
+    const fx = requireFixture();
+    const page = await signedInPage(browser, fx.citizen.email, fx.citizen.password);
+    await openReport(page, fx.reports.routed);
+    await expect(page.getByText(FEEDBACK_QUESTION)).toHaveCount(0);
+    await page.context().close();
   });
 
   test("a government viewer (not the reporter) never sees the resolution-feedback form on someone else's report", async ({
     browser,
   }) => {
-    const citizenContext = await browser.newContext({ storageState: AUTH_STATE_PATH });
-    const citizenPage = await citizenContext.newPage();
-    await citizenPage.goto("/dashboard/reports?status=RESOLVED");
-    const firstResolvedLink = citizenPage.getByRole("link", { name: /View details for/ }).first();
-    const hasResolvedReport = (await firstResolvedLink.count()) > 0;
-    test.skip(!hasResolvedReport, "No resolved report exists for the seeded citizen in this environment.");
-    const href = await firstResolvedLink.getAttribute("href");
-    await citizenContext.close();
-
-    const govContext = await browser.newContext();
-    const govPage = await govContext.newPage();
-    await govPage.goto("/sign-in");
-    await govPage.getByLabel("Email").fill(TEST_GOVERNMENT.email);
-    await govPage.getByLabel("Password").fill(TEST_GOVERNMENT.password);
-    await govPage.locator('button[type="submit"]', { hasText: "Sign In" }).click();
-    await govPage.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 15_000 });
-
-    await govPage.goto(href!);
-    // Government can VIEW the report (jurisdiction-based read access) but
-    // is never the original reporter, so the feedback form must not render
-    // — only report.reporterId === session user renders it (isOwner gate
-    // in src/app/reports/[id]/page.tsx).
-    await expect(govPage.getByText("Was this issue actually resolved?")).toHaveCount(0);
-    await govContext.close();
+    const fx = requireFixture();
+    const govPage = await signedInPage(browser, fx.government.email, fx.government.password);
+    // Government can VIEW the resolved report (jurisdiction-based read
+    // access) but is never the original reporter, so the feedback form must
+    // not render — only report.reporterId === session user renders it
+    // (isOwner gate in src/app/reports/[id]/page.tsx).
+    await openReport(govPage, fx.reports.resolved);
+    await expect(govPage.getByText(FEEDBACK_QUESTION)).toHaveCount(0);
+    await govPage.context().close();
   });
 });
 
-test.describe("Duplicate/related issue card privacy (Phase 6D)", () => {
-  test.use({ storageState: AUTH_STATE_PATH });
+test.describe.serial("Duplicate/related issue card privacy (Phase 6D)", () => {
+  test.beforeAll(async () => {
+    fixture = await createResolutionFeedbackFixture();
+  });
 
-  test("a duplicate/related issue card, when shown, never exposes another citizen's private details", async ({
-    page,
-  }) => {
-    await page.goto("/dashboard/reports");
-    const links = page.getByRole("link", { name: /View details for/ });
-    const count = await links.count();
-    test.skip(count === 0, "No reports exist for the seeded citizen in this environment.");
+  test.afterAll(async () => {
+    if (fixture) await fixture.cleanup();
+    fixture = null;
+  });
 
-    // Collect every href up front — navigating away invalidates `links`
-    // against the list page's DOM, so re-querying `.nth(i)` after the first
-    // goto() would hang waiting for an element that no longer exists there.
-    const hrefs: string[] = [];
-    for (let i = 0; i < Math.min(count, 15); i++) {
-      hrefs.push((await links.nth(i).getAttribute("href"))!);
-    }
+  test("a duplicate/related issue card never exposes another citizen's private details", async ({ browser }) => {
+    const fx = requireFixture();
+    const page = await signedInPage(browser, fx.citizen.email, fx.citizen.password);
+    await openReport(page, fx.reports.withDuplicate);
 
-    let found = false;
-    for (const href of hrefs) {
-      if (found) break;
-      await page.goto(href);
-      const duplicateCard = page.getByText(/Possible Duplicate Detected|Related Issue Detected/);
-      if (await duplicateCard.count()) {
-        found = true;
-        const cardText = await page.locator("body").innerText();
-        // Only ever a title/location/category/status/reason are shown — no
-        // email/phone pattern should ever appear inside the card's text.
-        expect(cardText).not.toMatch(/@test\.civicfix\.local/);
-        expect(cardText).not.toMatch(/\+91\d{10}/);
-      }
-    }
-    test.skip(!found, "No duplicate/related report exists for the seeded citizen in this environment.");
+    // The card really renders, and really points at the other citizen's report.
+    await expect(page.getByText(/Possible Duplicate Detected|Related Issue Detected/)).toBeVisible();
+    await expect(page.getByText(fx.otherReportTitle)).toBeVisible();
+
+    // Only a title/location/category/status/reason are shown — never the
+    // other reporter's identity or contact details, nor any email/phone.
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText).not.toContain(fx.otherCitizen.fullName);
+    expect(bodyText).not.toContain(fx.otherCitizen.email);
+    expect(bodyText).not.toContain(fx.otherCitizen.mobile);
+    expect(bodyText).not.toContain(fx.otherCitizen.mobile.replace("+91", ""));
+    expect(bodyText).not.toMatch(/@test\.civicfix\.local/);
+    expect(bodyText).not.toMatch(/\+91\d{10}/);
+    await page.context().close();
   });
 });

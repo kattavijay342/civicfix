@@ -2,6 +2,7 @@ import { test, expect, type Page, type Browser } from "@playwright/test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { TEST_GOVERNMENT } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * Phase G2 — Citizen report -> Government connectivity, end to end in a
@@ -14,15 +15,13 @@ import { AUTH_STATE_PATH } from "./global-setup";
  *   scoped to Tenali Municipality sees none of that, including via the
  *   direct report URL.
  *
- * Needs .env.local (service role) only to create/delete the throwaway
+ * Needs .env.g8-local (local service role) only to create/delete the throwaway
  * Tenali user and delete the test report afterwards.
  */
 
-try {
-  process.loadEnvFile(".env.local");
-} catch {
-  // Env already provided by the shell/CI.
-}
+// LOCAL Supabase only (e2e/local-supabase-guard.ts): loads .env.g8-local, never
+// .env.local, and aborts this file for any non-local URL or hosted key.
+requireLocalSupabaseEnv();
 
 const RUN_STARTED = new Date().toISOString();
 const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

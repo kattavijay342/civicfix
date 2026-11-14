@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { findIncidentMatch } from "./incident-detection";
+import { findIncidentMatch, type IncidentMatch } from "./incident-detection";
 import { computeIncidentPriority, computeIncidentConfidence, type DbLevel } from "./incident-priority";
 import { departmentIdForCategory } from "./actions/routing";
 import { isJurisdictionCompatible } from "./routing";
@@ -63,19 +63,114 @@ function averageCoordinate(
  * src/lib/actions/reports.ts — an incident-linking failure here must never
  * lose or corrupt the underlying report.
  */
-export async function evaluateIncidentForReport(admin: SupabaseClient, input: EvaluateIncidentInput): Promise<void> {
+export async function evaluateIncidentForReport(
+  admin: SupabaseClient,
+  input: EvaluateIncidentInput,
+  options: {
+    /** AI-2: "defer" (default) never calls Gemini here — an ambiguous match
+     * is recorded exactly like the "Gemini unavailable" outcome and a
+     * background confirmation job is queued (src/lib/incident-jobs.ts).
+     * "inline" keeps the original one-shot Gemini call. */
+    aiConfirmation?: "inline" | "defer";
+  } = {}
+): Promise<void> {
   const dbCategory = categoryToDb[input.category];
-  const match = await findIncidentMatch(admin, {
-    reportId: input.reportId,
-    category: dbCategory,
-    subcategory: input.subcategory ?? null,
-    location: input.location,
-    description: input.description,
-    createdAt: input.createdAt,
-    existingDuplicateCandidate: input.existingDuplicateCandidate,
-  });
+  const match = await findIncidentMatch(
+    admin,
+    {
+      reportId: input.reportId,
+      category: dbCategory,
+      subcategory: input.subcategory ?? null,
+      location: input.location,
+      description: input.description,
+      createdAt: input.createdAt,
+      existingDuplicateCandidate: input.existingDuplicateCandidate,
+    },
+    { aiConfirmation: options.aiConfirmation ?? "defer" }
+  );
   if (!match) return;
 
+  if (match.deferredConfirmation) {
+    await enqueueIncidentConfirmationJob(admin, {
+      reportId: input.reportId,
+      candidateReportId: match.reportId,
+      matchScore: match.score,
+    });
+  }
+
+  await applyIncidentMatch(admin, input, match);
+}
+
+export type EnqueueIncidentJobResult = "queued" | "already_queued" | "failed";
+
+/**
+ * Queues ONE deferred Gemini confirmation for this report against its single
+ * best ambiguous candidate: INSERT ... ON CONFLICT (report_id) DO NOTHING.
+ * Never throws — incident linking is best-effort and must never fail a
+ * report submission; a failure is logged with its error code only.
+ */
+export async function enqueueIncidentConfirmationJob(
+  admin: SupabaseClient,
+  input: { reportId: string; candidateReportId: string; matchScore: number }
+): Promise<EnqueueIncidentJobResult> {
+  try {
+    const { data, error } = await admin
+      .from("incident_confirmation_jobs")
+      .upsert(
+        {
+          report_id: input.reportId,
+          candidate_report_id: input.candidateReportId,
+          match_score: Math.round(Math.min(Math.max(input.matchScore, 0), 1) * 1000) / 1000,
+          status: "pending",
+        },
+        { onConflict: "report_id", ignoreDuplicates: true }
+      )
+      .select("report_id");
+    if (error) {
+      console.error("[incident-jobs] enqueue failed", { reportId: input.reportId, code: error.code ?? "unknown" });
+      return "failed";
+    }
+    return Array.isArray(data) && data.length > 0 ? "queued" : "already_queued";
+  } catch (err) {
+    console.error("[incident-jobs] enqueue failed", { reportId: input.reportId, code: err instanceof Error ? err.name : "unknown" });
+    return "failed";
+  }
+}
+
+export type ApplyIncidentMatchResult =
+  | "candidate_recorded"
+  | "candidate_not_recorded"
+  | "linked"
+  | "upgraded"
+  | "already_linked"
+  | "created"
+  | "skipped";
+
+/** Postgres unique-violation (incident_reports has UNIQUE (incident_id, report_id)). */
+const UNIQUE_VIOLATION = "23505";
+
+/**
+ * Applies one incident match for `input.reportId` — the linking logic that
+ * evaluateIncidentForReport always used, extracted so the AI-2 incident
+ * worker applies an AI-confirmed match with EXACTLY the same rules:
+ *   - the candidate report already belongs to an incident -> join it;
+ *   - otherwise found a new incident only when the match is not a mere
+ *     "candidate".
+ * Additions for the deferred-confirmation path (idempotent and safe under
+ * retries/concurrency):
+ *   - if this report already has a 'candidate' link in that incident, it is
+ *     upgraded with a guarded update (`where relationship_type =
+ *     'candidate'`) instead of a second insert — only the caller whose
+ *     update matched recomputes and notifies;
+ *   - an existing non-candidate link, or a UNIQUE(incident_id, report_id)
+ *     conflict on insert, is "already_linked": no recompute, no notification.
+ */
+export async function applyIncidentMatch(
+  admin: SupabaseClient,
+  input: EvaluateIncidentInput,
+  match: IncidentMatch
+): Promise<ApplyIncidentMatchResult> {
+  const dbCategory = categoryToDb[input.category];
   const { data: existingLink } = await admin
     .from("incident_reports")
     .select("incident_id")
@@ -84,33 +179,74 @@ export async function evaluateIncidentForReport(admin: SupabaseClient, input: Ev
     .maybeSingle();
 
   if (existingLink?.incident_id) {
-    await admin.from("incident_reports").insert({
+    if (match.relationshipType !== "candidate") {
+      const { data: ownLink } = await admin
+        .from("incident_reports")
+        .select("relationship_type")
+        .eq("incident_id", existingLink.incident_id)
+        .eq("report_id", input.reportId)
+        .maybeSingle();
+      if (ownLink) {
+        if (ownLink.relationship_type !== "candidate") return "already_linked";
+        const { data: upgraded } = await admin
+          .from("incident_reports")
+          .update({ relationship_type: match.relationshipType })
+          .eq("incident_id", existingLink.incident_id)
+          .eq("report_id", input.reportId)
+          .eq("relationship_type", "candidate")
+          .select("report_id");
+        if (!Array.isArray(upgraded) || upgraded.length === 0) return "already_linked";
+        await recomputeIncidentAggregate(admin, existingLink.incident_id);
+        await notifyIncidentEvent(admin, existingLink.incident_id, "incident_updated", input.location);
+        return "upgraded";
+      }
+    }
+
+    const { error: insertError } = await admin.from("incident_reports").insert({
       incident_id: existingLink.incident_id,
       report_id: input.reportId,
       relationship_type: match.relationshipType,
       confidence: match.score,
     });
+    if (insertError) {
+      if (insertError.code === UNIQUE_VIOLATION) return "already_linked";
+      console.error("Failed to link report to civic incident (non-fatal)", insertError.code ?? "unknown");
+      return "skipped";
+    }
     // A 'candidate' addition is recorded for human review only — it never
     // moves the incident's own severity/priority/confidence, and never
     // triggers a notification (spec §3/§15).
     if (match.relationshipType !== "candidate") {
       await recomputeIncidentAggregate(admin, existingLink.incident_id);
       await notifyIncidentEvent(admin, existingLink.incident_id, "incident_updated", input.location);
+      return "linked";
     }
-    return;
+    return "candidate_recorded";
   }
 
   // No existing incident to join — only FOUND a new one when confidence is
   // NOT merely a candidate (spec §3: never create/merge on insufficient
   // confidence; a lone low-confidence pair is simply left unrecorded).
-  if (match.relationshipType === "candidate") return;
+  if (match.relationshipType === "candidate") return "candidate_not_recorded";
+
+  // Idempotency for a re-run (e.g. a worker that crashed after founding):
+  // a report that is already a non-candidate member of any incident is
+  // never used to found another one.
+  const { data: ownMembership } = await admin
+    .from("incident_reports")
+    .select("incident_id")
+    .eq("report_id", input.reportId)
+    .neq("relationship_type", "candidate")
+    .limit(1)
+    .maybeSingle();
+  if (ownMembership?.incident_id) return "already_linked";
 
   const { data: matchedReport } = await admin
     .from("reports")
     .select("id, status, severity, created_at")
     .eq("id", match.reportId)
     .single();
-  if (!matchedReport) return;
+  if (!matchedReport) return "skipped";
 
   const { data: matchedLocation } = await admin
     .from("report_locations")
@@ -163,7 +299,7 @@ export async function evaluateIncidentForReport(admin: SupabaseClient, input: Ev
 
   if (incidentError || !incident) {
     console.error("Failed to create civic incident (non-fatal)", incidentError);
-    return;
+    return "skipped";
   }
 
   const { error: linkError } = await admin.from("incident_reports").insert([
@@ -172,10 +308,11 @@ export async function evaluateIncidentForReport(admin: SupabaseClient, input: Ev
   ]);
   if (linkError) {
     console.error("Failed to link reports to new civic incident (non-fatal)", linkError);
-    return;
+    return "skipped";
   }
 
   await notifyIncidentEvent(admin, incident.id, "incident_created", input.location);
+  return "created";
 }
 
 /**

@@ -96,9 +96,13 @@ export function buildGovernmentMetricsSnapshot(input: {
     total_issues: input.overview.totalIssues,
     resolved: input.overview.resolved,
     pending: input.overview.pending,
-    critical: input.overview.critical,
     resolution_rate: input.overview.resolutionRate,
   };
+  // G8 — open (unresolved) criticals only; omitted rather than guessed when
+  // get_insight_metrics() was unavailable.
+  if (input.overview.critical !== null) {
+    metrics.critical_open = input.overview.critical;
+  }
 
   if (input.aging) {
     metrics.aging_0_1_days = input.aging["0_1"];

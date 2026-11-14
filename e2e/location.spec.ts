@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
-import { TEST_GOVERNMENT } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { createGovernmentDashboardFixture } from "./government-dashboard-fixture";
 
 /**
  * Phase 6B — location/map E2E.
@@ -71,25 +71,36 @@ test.describe("Location — manual entry and GPS (Phase 6B)", () => {
 
 test.describe("Government Dashboard map (Phase 6B)", () => {
   test("shows either real coordinate-based markers or an honest empty state — never fake data", async ({ page }) => {
-    await page.goto("/sign-in");
-    await page.getByLabel("Email").fill(TEST_GOVERNMENT.email);
-    await page.getByLabel("Password").fill(TEST_GOVERNMENT.password);
-    await page.locator('button[type="submit"]', { hasText: "Sign In" }).click();
-    await page.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 15_000 });
+    // The map section renders only for a jurisdiction with issues: seed an
+    // isolated government user whose reports carry valid GPS coordinates.
+    const fixture = await createGovernmentDashboardFixture("map", { withCoordinates: true });
+    try {
+      await page.goto("/sign-in");
+      await page.getByLabel("Email").fill(fixture.email);
+      await page.getByLabel("Password").fill(fixture.password);
+      await page.locator('button[type="submit"]', { hasText: "Sign In" }).click();
+      await page.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 15_000 });
 
-    await page.goto("/government");
-    await expect(page.getByRole("heading", { name: "Government Area Map" })).toBeVisible({ timeout: 15_000 });
+      await page.goto("/government");
+      await expect(page.getByRole("heading", { name: "Government Area Map" })).toBeVisible({ timeout: 15_000 });
 
-    const emptyState = page.getByText("Not enough location data to generate this view");
-    const markerCaption = page.getByText(/of \d+ matching issue.* have\s*\n?\s*recorded GPS coordinates/);
+      const emptyState = page.getByText("Not enough location data to generate this view");
+      const markerCaption = page.getByText(/of \d+ matching issue.* have\s*\n?\s*recorded GPS coordinates/);
 
-    // Exactly one of these must be true — either real markers with a real
-    // coordinate count, or an explicit, honest "not enough data" state.
-    await expect(emptyState.or(markerCaption)).toBeVisible();
+      // Exactly one of these must be true — either real markers with a real
+      // coordinate count, or an explicit, honest "not enough data" state.
+      await expect(emptyState.or(markerCaption)).toBeVisible();
+      // This fixture's reports all carry valid GPS coordinates, so the real
+      // marker path (not the empty state) must be the one shown.
+      await expect(markerCaption).toBeVisible();
+      await expect(emptyState).toHaveCount(0);
 
-    // The category filter must not throw or blank the section when changed.
-    const categoryFilter = page.getByLabel("Filter map by category");
-    await categoryFilter.selectOption("ROAD");
-    await expect(page.getByRole("heading", { name: "Government Area Map" })).toBeVisible();
+      // The category filter must not throw or blank the section when changed.
+      const categoryFilter = page.getByLabel("Filter map by category");
+      await categoryFilter.selectOption("ROAD");
+      await expect(page.getByRole("heading", { name: "Government Area Map" })).toBeVisible();
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });

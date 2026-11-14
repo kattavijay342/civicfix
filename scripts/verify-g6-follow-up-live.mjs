@@ -24,8 +24,15 @@
 // @test.civicfix.local users and "G6 Test:" reports, all deleted at the
 // end; baseline counts compared before/after. INC-0002/INC-0003 and other
 // existing reports are never touched. Sends NO email.
-// Usage: node --env-file=.env.local scripts/verify-g6-follow-up-live.mjs
+// Usage: node --env-file=.env.g8-local scripts/verify-g6-follow-up-live.mjs
 import { createClient } from "@supabase/supabase-js";
+import { exitUnlessLocalSupabaseEnv } from "./lib/local-supabase-guard.mjs";
+
+// LOCAL Supabase only (scripts/lib/local-supabase-guard.mjs): loads .env.g8-local
+// if the env isn't set (never .env.local) and aborts before any client exists
+// unless the URL is http://127.0.0.1:54321 / http://localhost:54321 with the
+// local CLI's anon + service-role keys.
+exitUnlessLocalSupabaseEnv();
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;

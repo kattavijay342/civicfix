@@ -60,10 +60,10 @@ export function detectImageMimeType(buffer: Buffer): string | null {
  * formats and returns a safe extension for the storage path. Returns an
  * error string if the content doesn't match a real, allowed image format —
  * regardless of what the client claimed the type/filename were. */
-export function validateImageBuffer(buffer: Buffer): { error: string | null; extension: string } {
+export function validateImageBuffer(buffer: Buffer): { error: string | null; extension: string; mimeType: string } {
   const detected = detectImageMimeType(buffer);
   if (!detected) {
-    return { error: "Please upload a JPEG, PNG, WEBP, or HEIC photo.", extension: "jpg" };
+    return { error: "Please upload a JPEG, PNG, WEBP, or HEIC photo.", extension: "jpg", mimeType: "image/jpeg" };
   }
-  return { error: null, extension: EXTENSION_BY_MIME[detected] };
+  return { error: null, extension: EXTENSION_BY_MIME[detected], mimeType: detected };
 }

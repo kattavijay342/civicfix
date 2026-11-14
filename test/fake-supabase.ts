@@ -21,14 +21,31 @@ type Row = Record<string, unknown>;
  * row (which the real Postgres schema would never allow either). */
 export type UniqueConstraints = Record<string, string[]>;
 
-export function makeFakeClient(db: FakeDb, uniqueConstraints: UniqueConstraints = {}) {
-  return { from: (table: string) => new FakeQuery(db, table, uniqueConstraints[table]) };
+/** Optional extras for a fake client: `rpc` handlers (emulating SQL
+ * functions — see test/fake-ai-worker-db.ts) and an `auth` stub. */
+export interface FakeClientExtras {
+  rpc?: Record<string, (args: Record<string, unknown>) => { data: unknown; error: { message: string; code?: string } | null }>;
+  auth?: unknown;
+}
+
+export function makeFakeClient(db: FakeDb, uniqueConstraints: UniqueConstraints = {}, extras: FakeClientExtras = {}) {
+  return {
+    from: (table: string) => new FakeQuery(db, table, uniqueConstraints[table]),
+    rpc: async (name: string, args: Record<string, unknown> = {}) => {
+      const handler = extras.rpc?.[name];
+      if (!handler) return { data: null, error: { message: `fake-supabase: no rpc handler for ${name}`, code: "PGRST202" } };
+      return handler(args);
+    },
+    ...(extras.auth ? { auth: extras.auth } : {}),
+  };
 }
 
 class FakeQuery {
   private predicates: Array<(row: Row) => boolean> = [];
   private mode: "select" | "update" | "insert" | "delete" = "select";
   private payload: Row | null = null;
+  /** upsert(..., { ignoreDuplicates: true }) — INSERT ... ON CONFLICT DO NOTHING. */
+  private ignoreDuplicates = false;
   private limitN: number | null = null;
   private orderBy: { column: string; ascending: boolean } | null = null;
   /** Set by a test to simulate a failure for this table's next write. */
@@ -51,6 +68,16 @@ class FakeQuery {
   insert(data: Row) {
     this.mode = "insert";
     this.payload = data;
+    return this;
+  }
+  /** Only the `ignoreDuplicates: true` form is modeled (ON CONFLICT DO
+   * NOTHING against the table's configured unique columns): a conflicting
+   * row is skipped and returns no data and no error, like PostgREST. */
+  upsert(data: Row, opts?: { onConflict?: string; ignoreDuplicates?: boolean }) {
+    if (!opts?.ignoreDuplicates) throw new Error("fake-supabase: only upsert(..., { ignoreDuplicates: true }) is modeled");
+    this.mode = "insert";
+    this.payload = data;
+    this.ignoreDuplicates = true;
     return this;
   }
   update(data: Row) {
@@ -119,10 +146,33 @@ class FakeQuery {
       return { data: [], error: { message: forced }, count: null };
     }
 
+    if (this.mode === "insert" && Array.isArray(this.payload)) {
+      // Multi-row insert: all-or-nothing, like a single INSERT statement.
+      const payloads = this.payload as Row[];
+      const cols = this.uniqueColumns;
+      if (cols) {
+        const conflict = payloads.some(
+          (p, i) =>
+            this.rows().some((r) => cols.every((col) => r[col] === p[col])) ||
+            payloads.slice(0, i).some((q) => cols.every((col) => q[col] === p[col]))
+        );
+        if (conflict) {
+          return {
+            data: [],
+            error: { message: `duplicate key value violates unique constraint on ${this.table}(${cols.join(", ")})`, code: "23505" },
+            count: null,
+          };
+        }
+      }
+      const rows = payloads.map((p, i) => ({ id: `${this.table}_${this.rows().length + i + 1}_${Math.random().toString(36).slice(2, 8)}`, ...p }));
+      this.rows().push(...rows);
+      return { data: rows, error: null, count: null };
+    }
     if (this.mode === "insert") {
       if (this.uniqueColumns && this.payload) {
         const payload = this.payload;
         const conflict = this.rows().some((r) => this.uniqueColumns!.every((col) => r[col] === payload[col]));
+        if (conflict && this.ignoreDuplicates) return { data: [], error: null, count: null };
         if (conflict) {
           return {
             data: [],

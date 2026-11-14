@@ -94,4 +94,33 @@ describe("reverseGeocode", () => {
     const result = await reverseGeocode(16.2333, 80.0499);
     expect(result.status).toBe("unavailable");
   });
+
+  it("requests English results from the Mapbox v6 reverse endpoint", async () => {
+    const fetchMock = mockFetchOnce({ json: async () => ({ features: [{ properties: { full_address: "X" } }] }) });
+    await reverseGeocode(16.2333, 80.0499);
+    const url = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(url.pathname).toBe("/search/geocode/v6/reverse");
+    expect(url.searchParams.get("longitude")).toBe("80.0499");
+    expect(url.searchParams.get("latitude")).toBe("16.2333");
+    expect(url.searchParams.get("language")).toBe("en");
+  });
+
+  it("falls back to name + place_formatted when there is no full_address", async () => {
+    mockFetchOnce({
+      json: async () => ({
+        features: [{ properties: { name: "Sattenapalli", place_formatted: "Palnadu, Andhra Pradesh, India" } }],
+      }),
+    });
+    const result = await reverseGeocode(16.2333, 80.0499);
+    expect(result).toEqual({
+      status: "ok",
+      result: { formattedAddress: "Sattenapalli, Palnadu, Andhra Pradesh, India", landmark: "Sattenapalli" },
+    });
+  });
+
+  it("uses place_formatted alone when that is all Mapbox returns", async () => {
+    mockFetchOnce({ json: async () => ({ features: [{ properties: { place_formatted: "Palnadu, Andhra Pradesh" } }] }) });
+    const result = await reverseGeocode(16.2333, 80.0499);
+    expect(result.status === "ok" && result.result.formattedAddress).toBe("Palnadu, Andhra Pradesh");
+  });
 });

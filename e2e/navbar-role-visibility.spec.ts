@@ -2,14 +2,17 @@ import { test, expect, type Page } from "@playwright/test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { randomBytes } from "node:crypto";
 import { TEST_CITIZEN, TEST_GOVERNMENT, TEST_DEPARTMENT_INCHARGE } from "./fixtures";
+import { requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * "Report a Problem" in the global navbar is shown only to citizens (and
  * signed-out visitors). Admin uses a throwaway admin account (random
  * password, deleted afterwards) — there is no seeded admin test account.
- * Needs .env.local (service role) for that setup/cleanup only.
+ * Needs .env.g8-local (local service role) for that setup/cleanup only.
  */
-process.loadEnvFile(".env.local");
+// LOCAL Supabase only (e2e/local-supabase-guard.ts): loads .env.g8-local, never
+// .env.local, and aborts this file for any non-local URL or hosted key.
+requireLocalSupabaseEnv();
 
 test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -58,7 +61,7 @@ test.describe("Navbar — Report a Problem is citizen-only", () => {
 
   test("government user does not see it", async ({ page }) => {
     await signIn(page, "/sign-in?mode=authorized", TEST_GOVERNMENT.email, TEST_GOVERNMENT.password, /\/government$/);
-    await expect(page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Authorized Government User" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Authorized Government User" })).toHaveCount(0);
     await expect(navReport(page)).toHaveCount(0);
   });
 
@@ -72,9 +75,8 @@ test.describe("Navbar — Report a Problem is citizen-only", () => {
     await signIn(page, "/sign-in?mode=authorized", throwawayAdmin!.email, throwawayAdmin!.password, /\/admin$/);
     await expect(navReport(page)).toHaveCount(0);
     const nav = page.getByRole("navigation", { name: "Primary" });
-    await nav.getByRole("link", { name: "How It Works" }).click();
-    await expect(page).toHaveURL(/\/#how-it-works$/);
-    await nav.getByRole("link", { name: "Admin" }).click();
+    await page.goto("/");
+    await nav.getByRole("link", { name: "Admin", exact: true }).click();
     await expect(page).toHaveURL(/\/admin$/);
   });
 });

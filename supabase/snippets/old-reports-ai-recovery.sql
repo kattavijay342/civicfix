@@ -1,0 +1,109 @@
+-- ============================================================================
+-- CivicFix AI-2 — OLD REPORTS AI-ANALYSIS RECOVERY RUNBOOK (documentation only)
+-- ============================================================================
+--
+--   !!!  The DRY RUN below is a single read-only SELECT. Everything that
+--   !!!  writes (STEP 2) is commented out and needs its OWN explicit
+--   !!!  approval of the exact dry-run result and batch. Never run it as an
+--   !!!  experiment, never against all reports at once.
+--
+-- Background (Phase 4 diagnosis, read-only, 2026-11-14):
+--   * 82 reports total. 65 belong to seeded/E2E test accounts
+--     (@test.civicfix.local) — including ALL 49 reports stuck in `reported`.
+--     Those are EXCLUDED: never analyzed, never routed, never notified.
+--   * 17 real citizen reports: ALL already routed (assignment_method =
+--     'auto', category-based routing), but 16 have NO ai_analyses row.
+--   * The worker's automatic recovery (find_reports_missing_ai_job) only
+--     looks back 48 hours, so it will NEVER pick these up on its own.
+--     Recovering them is a deliberate, approved, one-off enqueue.
+--
+-- What an AI job does to an already-routed report (src/lib/ai-jobs.ts,
+-- src/lib/ai-analysis-persistence.ts):
+--   * inserts ONE ai_analyses row (UNIQUE report_id — never a second one);
+--   * updates reports.severity and reports.priority from the analysis;
+--   * notifies the reporter ("AI analysis completed") and, for a critical
+--     analysis, the jurisdiction's government users — once each, verified
+--     check-then-send (no duplicates on retry);
+--   * NEVER routes, never writes report_assignments, never changes
+--     reports.status. Department assignments are untouched.
+--   Product decision to confirm before STEP 2: citizens and officials will
+--   receive these notifications for reports filed weeks earlier, and
+--   department dashboards will see priority/severity values change.
+--
+-- Prerequisites for STEP 2: the AI worker is ACTIVE in production (deployed
+-- route + scheduler + STEP D-2 smoke test passed in ai-worker-schedule.sql),
+-- so enqueued jobs are processed by the bounded, sequential, leased worker
+-- (max 20 jobs/run, retries with backoff, max 6 attempts). Gemini calls:
+-- one per job (plus retries on transient errors) — 16 jobs ≈ 16 calls.
+
+-- ---------------------------------------------------------------------------
+-- STEP 1 — DRY RUN (read-only). Anonymized ids only (md5 prefix): no names,
+-- emails, titles, descriptions or locations are selected.
+-- ---------------------------------------------------------------------------
+-- with eligible as (
+--   select r.id, r.created_at, r.status
+--     from public.reports r
+--     join auth.users u on u.id = r.reporter_id
+--     join public.profiles p on p.id = r.reporter_id
+--    where u.email not like '%@test.civicfix.local'          -- no test accounts
+--      and p.role = 'citizen'                               -- citizen reporters only
+--      and r.status <> 'resolved'                           -- not terminal
+--      and exists (select 1 from public.report_locations l
+--                   where l.report_id = r.id)               -- has a location
+--      and not exists (select 1 from public.report_locations l
+--                       where l.report_id = r.id and l.area like 'E2E-%')
+--      and not exists (select 1 from public.ai_analyses a
+--                       where a.report_id = r.id)           -- not analyzed yet
+--      and not exists (select 1 from public.ai_analysis_jobs j
+--                       where j.report_id = r.id)           -- no job yet (no duplicates)
+-- )
+-- select count(*)                                            as eligible,
+--        count(*) filter (where status = 'routed')           as already_routed,
+--        min(created_at)::date                               as oldest,
+--        max(created_at)::date                               as newest,
+--        json_agg(left(md5(id::text), 8) order by created_at, id) as anon_ids
+--   from eligible;
+--
+-- Expected on 2026-11-14: eligible = 16, already_routed = 16. If the
+-- result differs, STOP and re-review before any approval.
+
+-- ---------------------------------------------------------------------------
+-- STEP 2 (SEPARATE APPROVAL per batch) — enqueue ONE bounded batch.
+-- Idempotent: report_id is the PRIMARY KEY of ai_analysis_jobs and
+-- ON CONFLICT DO NOTHING means a re-run can never create a second job.
+-- Batch size 5; oldest first. Re-run STEP 1 between batches.
+-- ---------------------------------------------------------------------------
+-- begin;
+-- with eligible as ( ...exactly the STEP 1 CTE... ),
+-- batch as (
+--   select id from eligible order by created_at, id limit 5
+-- )
+-- insert into public.ai_analysis_jobs (report_id)
+-- select id from batch
+-- on conflict (report_id) do nothing
+-- returning left(md5(report_id::text), 8) as anon_id;
+-- -- Check the returned anon_ids are exactly the approved ones, then:
+-- commit;      -- or: rollback;
+
+-- ---------------------------------------------------------------------------
+-- STEP 3 — MONITOR (read-only). Use the QH-1..QH-8 queries in
+-- ai-worker-schedule.sql, plus:
+-- ---------------------------------------------------------------------------
+-- select status, last_error_kind, count(*)
+--   from public.ai_analysis_jobs
+--  where created_at > now() - interval '1 day'
+--  group by 1, 2 order by 1, 2;
+--
+-- Stop rule: if any job in the batch ends `failed` with a non-transient
+-- kind (not_configured, invalid_output, persist_failed, unknown), do not
+-- enqueue the next batch until the cause is understood.
+
+-- ---------------------------------------------------------------------------
+-- AUDIT / ROLLBACK
+-- ---------------------------------------------------------------------------
+-- * Audit trail: the ai_analysis_jobs rows themselves (created_at,
+--   attempts, last_error_kind, notified_at) plus ai_analyses.created_at.
+-- * Before the worker processes them, pending jobs can be withdrawn
+--   (separate approval):
+--   delete from public.ai_analysis_jobs where status = 'pending' and report_id in (...);
+-- * Once processed, an analysis and its notifications are not rolled back.

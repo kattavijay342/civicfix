@@ -63,6 +63,14 @@ describe("validateImageBuffer", () => {
     const result = validateImageBuffer(jpeg);
     expect(result.error).toBeNull();
     expect(result.extension).toBe("jpg");
+    expect(result.mimeType).toBe("image/jpeg");
+  });
+  it("reports the sniffed MIME type, not whatever the browser claimed", () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const result = validateImageBuffer(png);
+    expect(result.error).toBeNull();
+    expect(result.mimeType).toBe("image/png");
+    expect(result.extension).toBe("png");
   });
   it("rejects bytes that merely claim to be an image (spoofed Content-Type case)", () => {
     const notAnImage = Buffer.from("this is not an image", "ascii");

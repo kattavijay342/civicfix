@@ -103,8 +103,9 @@ export interface DepartmentPerformance {
    * is never computed against a real deadline (see src/lib/data/government.ts).
    * Only ever a real number for clearly-labeled sample/demo data. */
   onTimeRate: number | null;
-  avgResolutionDays: number;
-  trend: number;
+  /** G8 — null when the department has no resolved issue to average, so
+   * the UI shows "—" instead of a misleading "0.0 days". */
+  avgResolutionDays: number | null;
 }
 
 export interface PendingByPriority {

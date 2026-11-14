@@ -4,6 +4,8 @@ import { randomUUID } from "crypto";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { analyzeReport, analyzeReportWithinBudget } from "@/lib/ai";
+import { notifyAiAnalysisComplete, persistAnalysis } from "@/lib/ai-analysis-persistence";
+import { enqueueAiJob } from "@/lib/ai-jobs";
 import { findPossibleDuplicate } from "@/lib/duplicate-detection";
 import { evaluateIncidentForReport } from "@/lib/incident-linking";
 import { loadConfiguredDepartments, routeReport, type RouteReportResult } from "@/lib/actions/routing";
@@ -15,7 +17,6 @@ import { checkRateLimit, retryAfterMessage } from "@/lib/rate-limit";
 import { beginIdempotentAction } from "@/lib/idempotency";
 import { sanitizeCoordinates } from "@/lib/location/validation";
 import { createNotification } from "@/lib/notifications/create";
-import { findGovernmentUsersForJurisdiction } from "@/lib/notifications/targeting";
 import { notifyGovernmentOfNewReport } from "@/lib/notifications/new-report";
 import { resolveReportJurisdiction } from "@/lib/report-jurisdiction";
 import type { ConfiguredDepartment, JurisdictionLike } from "@/lib/routing";
@@ -25,7 +26,10 @@ export type CreateReportState =
   | { status: "idle" }
   | { status: "error"; error: string }
   | { status: "duplicate"; duplicateReportId: string; duplicateTitle: string }
-  | { status: "success"; reportId: string; aiFailed: boolean };
+  /** `aiQueued`: whether an AI analysis job was recorded for this report
+   * (src/lib/ai-jobs.ts). Gemini never runs during submission; false means
+   * the job could not be enqueued (the report itself is saved and routed). */
+  | { status: "success"; reportId: string; aiQueued: boolean };
 
 const DB_FAILURE_MESSAGE = "Unable to save the report. Please try again.";
 const UPLOAD_FAILURE_MESSAGE = "Evidence upload failed. Please try again.";
@@ -44,119 +48,6 @@ const RETRY_CLAIM_WINDOW_MS = 120_000;
 
 const AI_RETRY_IN_PROGRESS_MESSAGE = "AI analysis is already being retried for this report. Please wait a moment.";
 const AI_UNAVAILABLE_MESSAGE = "AI analysis is temporarily unavailable.";
-
-/** Postgres unique-violation code (ai_analyses.report_id is UNIQUE). */
-const UNIQUE_VIOLATION = "23505";
-
-/**
- * Persists a completed analysis as pure enrichment: inserts the
- * ai_analyses row, then copies severity/priority onto the report. It never
- * touches the lifecycle status — routing already happened (or is pending)
- * independently, and AI must not move a report forwards or backwards.
- * Nothing else (notifications) may run unless this returns "persisted":
- *   - insert fails                 -> "failed"   (no analysis, retryable)
- *   - insert hits UNIQUE(report_id) -> "already"  (another request persisted it first)
- *   - severity/priority update fails -> the just-inserted analysis row is
- *     deleted again, so the report stays retryable -> "failed"
- */
-async function persistAnalysis(
-  admin: ReturnType<typeof createAdminClient>,
-  reportId: string,
-  analysis: Awaited<ReturnType<typeof analyzeReport>>
-): Promise<"persisted" | "already" | "failed"> {
-  const { error: insertError } = await admin.from("ai_analyses").insert(buildAiAnalysesRow(reportId, analysis));
-  if (insertError) {
-    if (insertError.code === UNIQUE_VIOLATION) return "already";
-    console.error("ai_analyses insert failed; report stays retryable", reportId, insertError);
-    return "failed";
-  }
-
-  const { data: updated, error: statusError } = await admin
-    .from("reports")
-    .update({ severity: analysis.severity, priority: analysis.priority })
-    .eq("id", reportId)
-    .select("id");
-  if (statusError || !updated || updated.length === 0) {
-    console.error("Severity/priority update after AI analysis failed; reverting the analysis row", reportId, statusError);
-    const { error: revertError } = await admin.from("ai_analyses").delete().eq("report_id", reportId);
-    if (revertError) console.error("Reverting the analysis row failed", reportId, revertError);
-    return "failed";
-  }
-  return "persisted";
-}
-
-/** Shared shape for the `ai_analyses` insert used by both the initial
- * submission path and the manual retry path — keeps the flat legacy
- * columns and the Phase 6A `extended` JSONB blob (subcategory, split
- * severity/priority reasoning, evidence, action steps, complaint draft) in
- * exactly one place. */
-function buildAiAnalysesRow(reportId: string, analysis: Awaited<ReturnType<typeof analyzeReport>>) {
-  return {
-    report_id: reportId,
-    problem_summary: analysis.problem_summary,
-    category: analysis.category,
-    severity: analysis.severity,
-    priority: analysis.priority,
-    reasoning: analysis.reasoning,
-    recommended_department: analysis.recommended_department,
-    recommended_action: analysis.recommended_action,
-    confidence: analysis.confidence,
-    model: analysis.model,
-    extended: {
-      subcategory: analysis.subcategory,
-      severity_reasoning: analysis.severity_reasoning,
-      priority_reasoning: analysis.priority_reasoning,
-      action_steps: analysis.action_steps,
-      affected_infrastructure: analysis.affected_infrastructure,
-      urgency_factors: analysis.urgency_factors,
-      safety_risk: analysis.safety_risk,
-      affected_population: analysis.affected_population,
-      time_context: analysis.time_context,
-      location_context: analysis.location_context,
-      evidence: analysis.evidence,
-      complaint_subject: analysis.complaint_subject,
-      complaint_impact: analysis.complaint_impact,
-      complaint_action: analysis.complaint_action,
-    },
-  };
-}
-
-/** Notifies the reporter that AI analysis finished, and — only when the AI
- * genuinely determined CRITICAL priority — alerts every government user
- * whose configured jurisdiction covers this report's location. Shared by
- * both the initial submission path and the manual retry path so the two
- * can't drift apart. */
-async function notifyAiAnalysisComplete(
-  admin: ReturnType<typeof createAdminClient>,
-  input: {
-    reportId: string;
-    reporterId: string;
-    title: string;
-    analysis: Awaited<ReturnType<typeof analyzeReport>>;
-    location: CivicLocation;
-  }
-) {
-  await createNotification(admin, {
-    recipientId: input.reporterId,
-    type: "ai_analysis_completed",
-    title: "AI analysis complete",
-    body: `"${input.title}" has been analyzed and classified as ${input.analysis.priority} priority.`,
-    relatedReportId: input.reportId,
-  });
-
-  if (input.analysis.priority === "critical") {
-    const govUserIds = await findGovernmentUsersForJurisdiction(admin, input.location);
-    for (const recipientId of govUserIds) {
-      await createNotification(admin, {
-        recipientId,
-        type: "critical_issue",
-        title: "Critical issue reported in your jurisdiction",
-        body: `"${input.title}" — ${input.analysis.problem_summary}`,
-        relatedReportId: input.reportId,
-      });
-    }
-  }
-}
 
 /** Deterministic category -> configured department -> authorized
  * in-charge routing for a saved report. Runs BEFORE (and independently of)
@@ -285,6 +176,15 @@ async function performCreateReport(
   const jurisdiction = resolvedJurisdiction.jurisdiction;
   location = { ...location, ...jurisdiction };
 
+  // The optional photo is fully validated — size, declared type AND the
+  // real file signature — BEFORE anything is written. An oversized or
+  // spoofed file therefore leaves no report, location, notification,
+  // assignment or storage object behind.
+  const validatedPhoto = await readAndValidatePhoto(photo);
+  if (validatedPhoto.status === "error") {
+    return { status: "error", error: validatedPhoto.error };
+  }
+
   // Keep the profile's own name/mobile in sync instead of duplicating it
   // per-report (Step "Reporter details").
   const { data: profile } = await supabase
@@ -348,14 +248,6 @@ async function performCreateReport(
 
   const reportId: string = report.id;
 
-  await createNotification(admin, {
-    recipientId: user.id,
-    type: "report_created",
-    title: "Report submitted",
-    body: `"${title}" has been received and is being analyzed.`,
-    relatedReportId: reportId,
-  });
-
   // Phase 6B: never trust client-supplied coordinates as-is — the client
   // already validates (SmartLocationField), but this is the actual security
   // boundary. An invalid/out-of-range pair becomes null (never a fake
@@ -380,6 +272,7 @@ async function performCreateReport(
   });
 
   if (locationError) {
+    await discardPartialReport(admin, reportId, null);
     return { status: "error", error: DB_FAILURE_MESSAGE };
   }
 
@@ -410,45 +303,42 @@ async function performCreateReport(
     }
   }
 
-  let imageBase64: string | undefined;
-  let imageMimeType: string | undefined;
-
-  if (photo instanceof File && photo.size > 0) {
-    const validationError = validateImageFile(photo);
-    if (validationError) {
-      return { status: "error", error: validationError };
-    }
+  if (validatedPhoto.status === "ok") {
+    const { buffer, extension, mimeType } = validatedPhoto;
+    const path = `${user.id}/${reportId}/${randomUUID()}.${extension}`;
+    let uploaded = false;
     try {
-      const buffer = Buffer.from(await photo.arrayBuffer());
-      const { error: bufferError, extension } = validateImageBuffer(buffer);
-      if (bufferError) {
-        return { status: "error", error: bufferError };
-      }
-      const path = `${user.id}/${reportId}/${randomUUID()}.${extension}`;
-
       const { error: uploadError } = await admin.storage
         .from("report-media")
-        .upload(path, buffer, { contentType: photo.type || "image/jpeg" });
+        .upload(path, buffer, { contentType: mimeType });
+      if (uploadError) throw new Error(`storage upload failed: ${uploadError.message ?? "unknown"}`);
+      uploaded = true;
 
-      if (uploadError) {
-        return { status: "error", error: UPLOAD_FAILURE_MESSAGE };
-      }
-
-      await admin.from("report_media").insert({
+      const { error: mediaError } = await admin.from("report_media").insert({
         report_id: reportId,
         uploaded_by: user.id,
         kind: "evidence",
         file_path: path,
         file_type: "image",
-        mime_type: photo.type || "image/jpeg",
+        mime_type: mimeType,
       });
-
-      imageBase64 = buffer.toString("base64");
-      imageMimeType = photo.type || "image/jpeg";
-    } catch {
+      if (mediaError) throw new Error(`report_media insert failed: ${mediaError.code ?? "unknown"}`);
+    } catch (err) {
+      console.error("Photo upload failed; discarding the partially created report", reportId, err instanceof Error ? err.message : "unknown");
+      await discardPartialReport(admin, reportId, uploaded ? path : null);
       return { status: "error", error: UPLOAD_FAILURE_MESSAGE };
     }
   }
+
+  // Only now — the report, its location and its photo are all saved — is
+  // the citizen told it was submitted. A failure above never notifies.
+  await createNotification(admin, {
+    recipientId: user.id,
+    type: "report_created",
+    title: "Report submitted",
+    body: `"${title}" has been received.`,
+    relatedReportId: reportId,
+  });
 
   const departments = await loadConfiguredDepartments(admin);
 
@@ -457,46 +347,19 @@ async function performCreateReport(
   // limited or slow can therefore never stop a report reaching its department.
   const routing = await routeSavedReport(admin, { reportId, title, category, location, departments });
 
-  // Optional AI enrichment (severity, priority, summary, suggested action).
-  // It never changes the department or the lifecycle status set above.
-  let aiFailed = false;
-  let completedAnalysis: Awaited<ReturnType<typeof analyzeReport>> | null = null;
-  try {
-    const analysis = await analyzeWithRetry({
-      description,
-      category,
-      location,
-      imageBase64,
-      imageMimeType,
-      departmentNames: departments.map((d) => d.name),
-    });
-
-    // Only a persisted analysis counts: if the row or the severity/priority
-    // update can't be written, this is treated exactly like an AI failure —
-    // the report keeps its routing and stays retryable, with no AI
-    // notification. (A brand-new report can't hit "already".)
-    if ((await persistAnalysis(admin, reportId, analysis)) !== "persisted") {
-      throw new Error("AI analysis could not be saved");
-    }
-    completedAnalysis = analysis;
-  } catch (err) {
-    aiFailed = true;
-    console.error("AI analysis failed for report", reportId, err);
-  }
-
-  if (completedAnalysis) {
-    // Best-effort side effect of an analysis that IS saved: a failure here
-    // must not relabel a successfully analyzed report as an AI failure.
-    try {
-      await notifyAiAnalysisComplete(admin, { reportId, reporterId: user.id, title, analysis: completedAnalysis, location });
-    } catch (err) {
-      console.error("Post-analysis notification failed (non-fatal)", reportId, err);
-    }
-  }
+  // AI enrichment is QUEUED, never run here: one ai_analysis_jobs row per
+  // report (INSERT ... ON CONFLICT DO NOTHING), processed later by the AI
+  // job worker (src/lib/ai-jobs.ts processAiJob). Gemini latency or outages
+  // (currently ~60s 503s) can therefore never delay or fail the citizen's
+  // submission, and AI never touches the department or lifecycle status set
+  // above. An enqueue failure is reported as aiQueued=false — never claimed
+  // as queued — and the owner's manual retry remains available.
+  // Phase 1: no worker invokes processAiJob automatically yet (Phase 2).
+  const aiQueue = await enqueueAiJob(admin, reportId);
 
   // Phase G2 — REPORT_CREATED for the government users whose jurisdiction
-  // covers this report. Sent after AI analysis so the payload carries the
-  // real priority when there is one (null, never guessed, when AI failed).
+  // covers this report. AI runs later (queued above), so priority is not
+  // known yet: null, never guessed.
   try {
     await notifyGovernmentOfNewReport(admin, {
       reportId,
@@ -504,25 +367,25 @@ async function performCreateReport(
       category: categoryToDb[category],
       categoryLabel: categoryLabels[category],
       jurisdiction,
-      priority: completedAnalysis?.priority ?? null,
+      priority: null,
     });
   } catch (err) {
     console.error("Government new-report notification failed (non-fatal)", reportId, err);
   }
 
   // Civic Incident Intelligence — best-effort, non-fatal, exactly like
-  // duplicate detection above: runs whether or not AI analysis succeeded
-  // (subcategory/severity are used only when available), and never affects
-  // the report that was already fully created above.
+  // duplicate detection above. AI analysis is queued, so subcategory and
+  // severity aren't known yet (null, exactly as when AI failed before); it
+  // never affects the report that was already fully created above.
   try {
     await evaluateIncidentForReport(admin, {
       reportId,
       category,
-      subcategory: completedAnalysis?.subcategory ?? null,
+      subcategory: null,
       description,
       location,
       createdAt: new Date().toISOString(),
-      severity: completedAnalysis?.severity ?? null,
+      severity: null,
       departmentId: routing?.outcome === "routed" ? routing.departmentId : null,
       existingDuplicateCandidate: duplicateCandidate
         ? { reportId: duplicateCandidate.reportId, relationType: duplicateCandidate.relationType }
@@ -532,7 +395,52 @@ async function performCreateReport(
     console.error("Incident linking failed for report", reportId, err);
   }
 
-  return { status: "success", reportId, aiFailed };
+  return { status: "success", reportId, aiQueued: aiQueue !== "failed" };
+}
+
+type ValidatedPhoto =
+  | { status: "none" }
+  | { status: "error"; error: string }
+  | { status: "ok"; buffer: Buffer; extension: string; mimeType: string };
+
+/** Reads the optional photo and validates it completely — size, declared
+ * type, and the actual file signature (magic bytes) — without writing
+ * anything. A missing or empty file is simply "none". */
+async function readAndValidatePhoto(photo: FormDataEntryValue | null): Promise<ValidatedPhoto> {
+  if (!(photo instanceof File) || photo.size === 0) return { status: "none" };
+  const validationError = validateImageFile(photo);
+  if (validationError) return { status: "error", error: validationError };
+  let buffer: Buffer;
+  try {
+    buffer = Buffer.from(await photo.arrayBuffer());
+  } catch {
+    return { status: "error", error: UPLOAD_FAILURE_MESSAGE };
+  }
+  const { error: bufferError, extension, mimeType } = validateImageBuffer(buffer);
+  if (bufferError) return { status: "error", error: bufferError };
+  return { status: "ok", buffer, extension, mimeType };
+}
+
+/** Compensating cleanup when report creation fails after the report row was
+ * inserted: removes the uploaded storage object (if any), then every row
+ * this action wrote, then the report itself (status_history from the insert
+ * trigger cascades with it). Best-effort and logged — the caller still
+ * returns the original error to the citizen. */
+async function discardPartialReport(
+  admin: ReturnType<typeof createAdminClient>,
+  reportId: string,
+  uploadedPath: string | null
+): Promise<void> {
+  if (uploadedPath) {
+    const { error } = await admin.storage.from("report-media").remove([uploadedPath]);
+    if (error) console.error("Cleanup: failed to remove uploaded photo", reportId);
+  }
+  for (const table of ["report_media", "report_duplicate_flags", "report_locations"] as const) {
+    const { error } = await admin.from(table).delete().eq("report_id", reportId);
+    if (error) console.error(`Cleanup: failed to delete ${table} rows`, reportId);
+  }
+  const { error } = await admin.from("reports").delete().eq("id", reportId);
+  if (error) console.error("Cleanup: failed to delete the partially created report", reportId);
 }
 
 /** Statuses in which a missing AI analysis is still worth retrying: before

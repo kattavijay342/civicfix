@@ -1,0 +1,460 @@
+-- ============================================================================
+-- CivicFix AI-2 — scheduler RUNBOOK (documentation only)
+-- ============================================================================
+--
+--   !!!  DO NOT RUN ANY OF THIS UNTIL SEPARATELY APPROVED (checkpoints CP4/CP5).
+--   !!!  This file is NOT a migration and is never applied automatically.
+--   !!!  It contains NO secrets: placeholders in <angle brackets> must be
+--   !!!  replaced by the operator at execution time, never committed.
+--   !!!  Every statement below is commented out on purpose. Each step is run
+--   !!!  by hand, one at a time, only after its own approval.
+--
+-- What it sets up: Supabase pg_cron runs every 2 minutes and, via pg_net,
+-- POSTs to the CivicFix worker route /api/cron/ai-jobs with
+-- `Authorization: Bearer <CRON_SECRET>` read from Supabase Vault. The
+-- request carries a 285 s pg_net request timeout (route maxDuration 300 s,
+-- worker run budget 240 s, global worker lease 270 s) — see "pg_net TIMEOUT"
+-- below: that 285 s value is an ASSUMPTION, not a verified behavior.
+--
+-- Scheduler platform (decided at CP4A for the Supabase FREE plan):
+--   * Supabase pg_cron + pg_net is the intended scheduler for this worker.
+--   * Do NOT add a Vercel cron for /api/cron/ai-jobs. On the Vercel Hobby
+--     plan, Cron Jobs run at most once per day (with up to ±59 min drift),
+--     which cannot meet a 2-minute schedule; a more frequent expression fails
+--     at deployment. vercel.json keeps only the daily reminders cron.
+--   * Deploying the app to Vercel is a SEPARATE step from scheduler setup.
+--     Deploying does not schedule anything; scheduling (STEP E) is last.
+--
+-- Overlap: the cron job itself only QUEUES the HTTP request (pg_net sends
+-- after the transaction commits), so pg_cron's "one instance per job" rule
+-- does not stop overlapping worker runs. Overlap safety comes from the
+-- worker's global lease (acquire_ai_worker_lease, migration 0020; renewed by
+-- renew_ai_worker_lease, migration 0021): a run that can't take it returns
+-- `lease_held` immediately without calling Gemini.
+--
+-- ---------------------------------------------------------------------------
+-- VERIFIED ENVIRONMENT FACTS (CP4A, read-only catalog checks, hosted project)
+-- ---------------------------------------------------------------------------
+--   * Postgres 17.6.
+--   * pg_cron 1.6.4 and pg_net 0.20.4: AVAILABLE, NOT INSTALLED. Both are
+--     already in shared_preload_libraries (enabling needs no restart).
+--   * supabase_vault 0.3.1: INSTALLED (schema `vault`); vault.create_secret
+--     accepts (new_secret, new_name) with the other arguments defaulted.
+--   * Migrations applied remotely: up to 0018 only. 0019–0022 NOT applied.
+--   * pg_net 0.20.4 settings present: pg_net.batch_size = 200,
+--     pg_net.ttl = 6 hours, pg_net.database_name = postgres,
+--     pg_net.username = postgres. There is NO pg_net.max_timeout_ms setting
+--     in this version (that setting is documented only for newer pg_net).
+--   * cron.max_running_jobs = 32, cron.timezone = GMT, cron.log_run = on.
+--
+-- ---------------------------------------------------------------------------
+-- PREREQUISITES (verify each before running anything; all via the dashboard
+-- or separately approved read-only checks):
+--   1. BACKUP: a successful manual backup exists, taken immediately before
+--      the production migrations (STEP 0 below): all four files
+--      (roles.sql, schema.sql, data.sql, migration_history.sql) non-empty,
+--      migration history verified, and SHA256SUMS.txt verified.
+--   2. MIGRATIONS: all four AI-2 migrations applied to production, IN THIS
+--      ORDER, and verified (STEP A below):
+--        1) 0019_ai_analysis_jobs.sql
+--        2) 0020_ai_worker.sql
+--        3) 0021_ai_worker_lease_renewal.sql
+--        4) 0022_ai_job_lease_budget_deferral.sql
+--      The worker code calls renew_ai_worker_lease() (0021) and reads
+--      ai_analysis_jobs.lease_budget_deferrals (0022); on 0019–0020 alone it
+--      fails. The worker MUST NOT be deployed or invoked — not manually, not
+--      by any scheduler — until ALL FOUR migrations are applied and verified.
+--   3. DEPLOY (separate from scheduling): code with /api/cron/ai-jobs
+--      deployed, with CRON_SECRET and AI_JOB_RECOVERY_SINCE set in the
+--      Vercel Production environment (CP5), only after prerequisite 2.
+--   4. Vercel Deployment Protection does NOT block the production URL for
+--      unauthenticated server-to-server requests (otherwise pg_net gets 401).
+--   5. Extensions enabled with approval: pg_cron, pg_net (STEP B).
+--      supabase_vault is already installed.
+--   6. `net` schema hardening checks pass (STEP C).
+--   7. The separately approved manual authorized HTTP smoke test (STEP D-2)
+--      returned HTTP 200 with a summary.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- STEP 0 (separate approval) — manual backup BEFORE production migrations.
+-- Run from a terminal (Git Bash), NOT here, from the CivicFix repository
+-- folder so `--linked` targets the linked production project.
+-- ---------------------------------------------------------------------------
+-- The Free plan has NO automatic backups and NO point-in-time recovery, so a
+-- manual dump is the only way back. Required before STEP A starts: ALL FOUR
+-- dump commands succeed (stop at the first failure), all four files are
+-- non-empty, migration_history.sql lists every applied version, and
+-- SHA256SUMS.txt verifies.
+--
+-- 0-1. Create a NEW timestamped folder OUTSIDE OneDrive and outside the
+--      repository. Never reuse, overwrite or modify an existing backup folder.
+--   B="/c/Users/<user>/civicfix-backups/pre-ai2-$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+--   [ -e "$B" ] && echo "exists — stop" || mkdir "$B"
+--
+-- 0-2. The four required dumps, in this order:
+--   npx supabase db dump --linked -f "$B/roles.sql" --role-only
+--   npx supabase db dump --linked -f "$B/schema.sql"
+--   npx supabase db dump --linked -f "$B/data.sql" --use-copy --data-only
+--   npx supabase db dump --linked -f "$B/migration_history.sql" --use-copy --data-only -s supabase_migrations
+--
+--   File                   Contains (per the CLI's own pg_dump scripts)
+--   roles.sql              Custom roles only, without passwords. Supabase
+--                          built-in roles (anon, authenticated, service_role,
+--                          postgres, supabase_*) are deliberately left out, so
+--                          this file can be very small. Non-empty is enough.
+--   schema.sql             App schemas (public): tables, functions, triggers,
+--                          RLS policies. Excludes platform schemas (auth,
+--                          storage, vault, extensions, cron, net,
+--                          supabase_migrations, ...).
+--   data.sql               Row data for public, auth and storage (storage =
+--                          bucket/object METADATA rows only). Excludes
+--                          supabase_migrations and vault.
+--   migration_history.sql  supabase_migrations.schema_migrations — the applied
+--                          migration versions. NOT in any other file: without
+--                          it a restore loses the record of which migrations
+--                          ran.
+--
+-- 0-3. Verify (local file checks only — never print row data):
+--   for f in roles.sql schema.sql data.sql migration_history.sql; do
+--     [ -s "$B/$f" ] && echo "OK $f" || echo "EMPTY/MISSING $f — stop"
+--   done
+--   # Applied versions only (first column); before STEP A this must be
+--   # exactly 0001 … 0018:
+--   awk '/^COPY "supabase_migrations"."schema_migrations"/{f=1;next}
+--        f&&/^\\\.$/{f=0} f{split($0,a,"\t"); print a[1]}' "$B/migration_history.sql"
+--
+-- 0-4. Checksums — generate once, then verify (now, and before any restore):
+--   (cd "$B" && sha256sum roles.sql schema.sql data.sql migration_history.sql > SHA256SUMS.txt)
+--   (cd "$B" && sha256sum -c SHA256SUMS.txt)     # every line must say OK
+--   A failed check means a file changed or is corrupt: do not restore from it.
+--
+-- !!! SENSITIVE: data.sql contains production auth data — auth.users (emails
+-- !!! and password hashes), auth.identities, auth.sessions and
+-- !!! auth.refresh_tokens — plus report content and locations. Treat it as a
+-- !!! credential store: keep it outside OneDrive and the repository, never
+-- !!! commit, upload, share or paste it, never print its rows, prefer an
+-- !!! encrypted location (e.g. BitLocker or an AES-encrypted archive), and
+-- !!! delete it when no longer needed.
+--
+-- Limits of this backup:
+--   * Storage bucket FILES are NOT included. data.sql only has the
+--     storage.objects metadata rows that point to them; the files stay in
+--     Supabase Storage and must be downloaded separately if they need
+--     protecting.
+--   * The four dumps run one after another, not as one snapshot. Run them at
+--     a quiet time so writes in between can't leave the files out of step.
+--   * Restore needs a Supabase target (auth/storage tables and built-in roles
+--     must already exist), not plain Postgres. Test restores go into a
+--     separate scratch Supabase stack with its own project_id and ports —
+--     NEVER into the CivicFix local E2E stack, and never into production
+--     without its own approval. Load order: roles -> schema ->
+--     migration_history -> data.
+--   * Vault secrets are encrypted with this project's own root key: a dump
+--     restored into a DIFFERENT project cannot decrypt them (and vault is not
+--     dumped at all). After such a restore, re-create the two secrets in
+--     STEP D-1.
+
+-- ---------------------------------------------------------------------------
+-- STEP A (CP4b, separate approval) — apply 0019, 0020, 0021, 0022 in order,
+-- then verify (read-only) before anything calls the worker.
+-- ---------------------------------------------------------------------------
+-- All four must be listed:
+-- select version from supabase_migrations.schema_migrations
+--  where version in ('0019', '0020', '0021', '0022') order by version;
+-- The objects the worker depends on must exist:
+-- select to_regclass('public.ai_analysis_jobs')           is not null as jobs_table,
+--        to_regclass('public.incident_confirmation_jobs') is not null as incident_jobs_table,
+--        to_regclass('public.ai_worker_lease')            is not null as lease_table,
+--        to_regprocedure('public.renew_ai_worker_lease(text, uuid, integer)') is not null as renew_fn_0021,
+--        exists (select 1 from information_schema.columns
+--                 where table_schema = 'public' and table_name = 'ai_analysis_jobs'
+--                   and column_name = 'lease_budget_deferrals') as deferrals_col_0022;
+-- Every value must be true. If not, STOP: do not deploy or invoke the worker.
+
+-- ---------------------------------------------------------------------------
+-- STEP B (CP4c, separate approval) — enable extensions, only if not enabled.
+-- ---------------------------------------------------------------------------
+-- create extension if not exists pg_cron;
+-- create extension if not exists pg_net with schema extensions;
+-- (supabase_vault 0.3.1 is already installed — verified at CP4A.)
+--
+-- Read-only confirmation afterwards:
+-- select name, default_version, installed_version
+--   from pg_available_extensions where name in ('pg_cron', 'pg_net', 'supabase_vault');
+-- select name, setting from pg_settings where name like 'pg_net.%' order by name;
+
+-- ---------------------------------------------------------------------------
+-- STEP C — `net` schema security (read-only checks; NO changes in CP4B)
+-- ---------------------------------------------------------------------------
+-- Why: pg_net stores each queued request, INCLUDING ITS HEADERS, in
+-- net.http_request_queue until the background worker sends it. The
+-- scheduled request's headers contain `Authorization: Bearer <CRON_SECRET>`,
+-- so a queued row can hold the worker secret in plain text. Responses are
+-- kept in net._http_response for pg_net.ttl (6 hours). Supabase documents
+-- that anon and authenticated may inherit object-level access (e.g. SELECT)
+-- on both tables.
+--
+-- Rule: the `net` schema must NEVER be in the Supabase API's exposed
+-- schemas, so PostgREST/the Data API can never serve these tables.
+--
+-- C-1. Exposed schemas — check in the dashboard: Project Settings -> Data API
+--      -> Exposed schemas. `net` must NOT be listed. (Locally the same list
+--      is `[api] schemas` in supabase/config.toml.) Optional read-only
+--      catalog hint (may be empty on hosted projects, where the setting
+--      lives in the API service configuration instead):
+-- select rolname, rolconfig from pg_roles where rolname = 'authenticator';
+--
+-- C-2. Grants on the queue and response tables (read-only):
+-- select r.rolname,
+--        has_schema_privilege(r.rolname, 'net', 'USAGE')                     as net_usage,
+--        has_table_privilege(r.rolname, 'net.http_request_queue', 'SELECT')  as queue_select,
+--        has_table_privilege(r.rolname, 'net._http_response', 'SELECT')     as response_select
+--   from pg_roles r where r.rolname in ('anon', 'authenticated', 'service_role');
+-- select grantee, table_name, privilege_type
+--   from information_schema.role_table_grants
+--  where table_schema = 'net' and table_name in ('http_request_queue', '_http_response')
+--  order by table_name, grantee, privilege_type;
+--
+-- If anon or authenticated show access, record it and decide on any
+-- REVOKE in a SEPARATELY APPROVED change. No REVOKE/GRANT and no API
+-- setting change is made in this phase.
+
+-- ---------------------------------------------------------------------------
+-- STEP D-1 (CP4d, separate approval) — store the worker URL and secret in Vault.
+-- Run interactively; never save the real values in this file or in Git.
+-- ---------------------------------------------------------------------------
+-- select vault.create_secret('https://<production-domain>/api/cron/ai-jobs', 'civicfix_ai_worker_url');
+-- select vault.create_secret('<CRON_SECRET value>', 'civicfix_cron_secret');
+
+-- ---------------------------------------------------------------------------
+-- pg_net TIMEOUT (read before STEP D-2)
+-- ---------------------------------------------------------------------------
+-- * Hosted pg_net version: 0.20.4.
+-- * `timeout_milliseconds := 285000` below is a request-level timeout that
+--   is CURRENTLY AN UNVERIFIED ASSUMPTION. pg_net 0.20.4 has no
+--   pg_net.max_timeout_ms setting, so there is no setting to check; the
+--   old "show pg_net.max_timeout_ms" prerequisite is invalid and removed.
+--   Nothing in this runbook proves that a 285 s request completes rather
+--   than being cut short.
+-- * If pg_net gives up early, the worker run on Vercel keeps going and the
+--   global lease still prevents overlap; the effect is a `timed_out` row in
+--   net._http_response. This is expected behavior, not a verified one.
+-- * Only the STEP D-2 smoke test, run after STEP B, provides real evidence.
+
+-- ---------------------------------------------------------------------------
+-- STEP D-2 (separate approval) — manual authorized HTTP smoke test via pg_net.
+-- Only after STEP A verified, the app deployed (prerequisite 3), STEP B and
+-- STEP D-1 done. This invokes the real worker ONCE (it may process due jobs
+-- and call Gemini). Run one statement, once.
+-- ---------------------------------------------------------------------------
+-- select net.http_post(
+--   url := (select decrypted_secret from vault.decrypted_secrets where name = 'civicfix_ai_worker_url'),
+--   headers := jsonb_build_object(
+--     'Content-Type', 'application/json',
+--     'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'civicfix_cron_secret')
+--   ),
+--   body := '{}'::jsonb,
+--   timeout_milliseconds := 285000
+-- ) as request_id;
+--
+-- Then, read-only, with the returned request_id (status only — never select
+-- headers or bodies):
+-- select id, status_code, timed_out, created
+--   from net._http_response where id = <request_id>;
+-- Pass = status_code 200 and timed_out false. Record whether the run was
+-- short (idle queue) or long, since a short run says nothing about 285 s.
+-- Anything else: STOP, do not schedule.
+
+-- ---------------------------------------------------------------------------
+-- STEP E (CP5, LAST step after deploy + STEP D-2 passed) — schedule.
+-- ---------------------------------------------------------------------------
+-- select cron.schedule(
+--   'civicfix-ai-worker',
+--   '*/2 * * * *',
+--   $job$
+--   select net.http_post(
+--     url := (select decrypted_secret from vault.decrypted_secrets where name = 'civicfix_ai_worker_url'),
+--     headers := jsonb_build_object(
+--       'Content-Type', 'application/json',
+--       'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'civicfix_cron_secret')
+--     ),
+--     body := '{}'::jsonb,
+--     timeout_milliseconds := 285000
+--   );
+--   $job$
+-- );
+
+-- ---------------------------------------------------------------------------
+-- MONITORING (read-only)
+-- ---------------------------------------------------------------------------
+-- select jobid, jobname, schedule, active from cron.job where jobname = 'civicfix-ai-worker';
+-- select status, start_time, end_time, return_message
+--   from cron.job_run_details
+--  where jobid = (select jobid from cron.job where jobname = 'civicfix-ai-worker')
+--  order by start_time desc limit 20;
+-- -- pg_net keeps responses ~6 hours (pg_net.ttl):
+-- select id, status_code, timed_out, created from net._http_response order by created desc limit 20;
+-- select name, holder is not null as held, locked_until from public.ai_worker_lease;
+--
+-- ---------------------------------------------------------------------------
+-- QUEUE HEALTH (read-only, SELECT only, counts/categories only — no report
+-- content). Requires migrations 0019–0022.
+-- ---------------------------------------------------------------------------
+-- A plain `status` count is MISLEADING for ai_analysis_jobs: some
+-- `processing` rows are not being worked on, and some `failed` rows are not
+-- failures. The categories below mirror aiJobHealthCategory() in
+-- src/lib/ai-worker.ts exactly, checked in the same order:
+--   parked_notify    status='processing', attempts >= max_attempts,
+--                    last_error_kind='notify_failed'. Analysis is SAVED;
+--                    only notification delivery is retried (every ~5 min,
+--                    NOTIFY_RETRY_MS). Never claimed for Gemini again.
+--   excluded         status='failed', attempts=0, last_error_kind in
+--                    ('excluded_test_account','reporter_missing'). Written by
+--                    missing-job recovery on purpose; the report is never
+--                    analyzed. NOT a failure.
+--   notify_abandoned status='failed', last_error_kind='notify_abandoned'.
+--                    Analysis is SAVED; notifications were given up on after
+--                    7 days (NOTIFY_MAX_AGE_MS). Needs a look, not a Gemini retry.
+--   anything else    genuine state (pending / processing / completed /
+--                    failed). Note `lease_budget_exhausted` can ALSO be
+--                    failed with attempts=0 — it is a genuine failure; the
+--                    exclusion test is the error kind, not attempts=0 alone.
+--
+-- QH-1. AI jobs by health category (the main dashboard query):
+-- select case
+--          when status = 'processing' and attempts >= max_attempts
+--               and last_error_kind = 'notify_failed'                  then 'parked_notify'
+--          when status = 'failed' and attempts = 0
+--               and last_error_kind in ('excluded_test_account',
+--                                       'reporter_missing')            then 'excluded'
+--          when status = 'failed' and last_error_kind = 'notify_abandoned' then 'notify_abandoned'
+--          when status = 'failed'                                       then 'failed_genuine'
+--          when status in ('pending', 'processing')                     then 'active_' || status
+--          else status                                                  -- 'completed'
+--        end as health,
+--        count(*) as jobs,
+--        min(created_at) as oldest_created
+--   from public.ai_analysis_jobs
+--  group by 1
+--  order by 1;
+--
+-- QH-2. Active AI jobs (real queued/in-flight work; parked rows excluded):
+-- select status,
+--        case when status = 'pending'    then next_attempt_at <= now()
+--             else locked_until < now() end            as due_or_lease_expired,
+--        count(*)                                       as jobs,
+--        count(*) filter (where last_error_kind = 'lease_budget') as lease_budget_deferred,
+--        max(lease_budget_deferrals)                    as max_deferrals,
+--        max(attempts)                                  as max_attempts_used,
+--        min(created_at)                                as oldest_created
+--   from public.ai_analysis_jobs
+--  where status in ('pending', 'processing')
+--    and not (status = 'processing' and attempts >= max_attempts
+--             and last_error_kind = 'notify_failed')
+--  group by 1, 2
+--  order by 1, 2;
+-- (processing + lease expired + attempts >= max_attempts = a crashed final
+--  attempt waiting for the worker's exhausted-job sweep.)
+--
+-- QH-3. Parked notification-retry AI jobs:
+-- select count(*)                                                  as parked,
+--        min(created_at)                                           as oldest_created,
+--        count(*) filter (where created_at < now() - interval '6 days') as near_abandon_7d,
+--        count(*) filter (where locked_until < now())              as retry_due
+--   from public.ai_analysis_jobs
+--  where status = 'processing'
+--    and attempts >= max_attempts
+--    and last_error_kind = 'notify_failed';
+--
+-- QH-4. Excluded / recovery-ineligible AI jobs (intentional, not failures):
+-- select last_error_kind, count(*) as jobs, max(created_at) as newest
+--   from public.ai_analysis_jobs
+--  where status = 'failed' and attempts = 0
+--    and last_error_kind in ('excluded_test_account', 'reporter_missing')
+--  group by 1
+--  order by 1;
+--
+-- QH-5. Abandoned AI jobs (analysis saved, notifications never delivered):
+-- select count(*) as abandoned, max(updated_at) as most_recent
+--   from public.ai_analysis_jobs
+--  where status = 'failed' and last_error_kind = 'notify_abandoned';
+--
+-- QH-6. Permanently failed AI jobs — GENUINE failures only (excludes QH-4
+-- and QH-5). Kinds come from the app's sanitized error classes, e.g.
+-- http_<status>, timeout, network, invalid_output, not_configured,
+-- persist_failed, lease_expired, lease_budget_exhausted, unknown.
+-- (notify_failed never ends as `failed`: with attempts left it is retried as
+--  pending; on the final attempt it is parked, QH-3.)
+-- select last_error_kind, last_error_status, count(*) as jobs,
+--        max(updated_at) as most_recent
+--   from public.ai_analysis_jobs
+--  where status = 'failed'
+--    and not (attempts = 0 and coalesce(last_error_kind, '') in ('excluded_test_account', 'reporter_missing'))
+--    and coalesce(last_error_kind, '') <> 'notify_abandoned'
+--  group by 1, 2
+--  order by jobs desc;
+--
+-- QH-7. Completed AI jobs whose notifications may have been lost (0020:
+-- notified_at NULL on a completed job; the worker re-checks these):
+-- select count(*) as completed_without_notified_at
+--   from public.ai_analysis_jobs
+--  where status = 'completed' and notified_at is null;
+--
+-- QH-8. Incident confirmation jobs. This table has NO parked, excluded or
+-- abandoned states (no notified_at, no recovery exclusions). Its only
+-- non-obvious case: status='completed' with last_error_kind='not_eligible'
+-- is a deliberate skip (category mismatch, candidate resolved or outside
+-- the window), not an error. Genuine failures: report_missing, http_<status>,
+-- timeout, network, invalid_output, not_configured, unknown, lease_expired,
+-- lease_budget_exhausted.
+-- select status,
+--        case
+--          when status = 'completed' and last_error_kind = 'not_eligible' then 'completed_not_eligible'
+--          when status = 'completed'                                      then 'completed_checked'
+--          when status = 'pending'    then case when next_attempt_at <= now() then 'pending_due' else 'pending_scheduled' end
+--          when status = 'processing' then case when locked_until < now() then 'processing_lease_expired' else 'processing' end
+--          else 'failed:' || coalesce(last_error_kind, 'none')
+--        end as detail,
+--        count(*) as jobs,
+--        max(lease_budget_deferrals) as max_deferrals,
+--        min(created_at) as oldest_created
+--   from public.incident_confirmation_jobs
+--  group by 1, 2
+--  order by 1, 2;
+-- -- cron log size:
+-- select count(*) as rows, min(start_time) as oldest from cron.job_run_details;
+
+-- ---------------------------------------------------------------------------
+-- CRON LOG RETENTION (documentation only — nothing created or deleted now)
+-- ---------------------------------------------------------------------------
+-- cron.log_run is on, so every run adds a row to cron.job_run_details.
+-- At '*/2 * * * *' that is about 720 rows/day (~21,600/month, ~263,000/year)
+-- for this job alone, and pg_cron does not purge them. On the Free plan's
+-- 500 MB database this growth should be bounded.
+--
+-- FUTURE recommendation (separate approval, NOT part of CP4B): a daily
+-- cleanup job that keeps a short window, for example:
+-- select cron.schedule(
+--   'civicfix-cron-log-cleanup',
+--   '15 3 * * *',
+--   $job$ delete from cron.job_run_details where end_time < now() - interval '7 days' $job$
+-- );
+-- Until then, watch the "cron log size" monitoring query above.
+-- net._http_response needs no job: pg_net deletes rows after pg_net.ttl.
+
+-- ---------------------------------------------------------------------------
+-- ROLLBACK / STOP
+-- ---------------------------------------------------------------------------
+-- 1. Stop scheduling (the worker code then stays inert — nothing calls it):
+-- select cron.unschedule('civicfix-ai-worker');
+--    Do NOT disable the pg_cron extension to stop it: that permanently
+--    deletes every cron job.
+-- 2. Optionally pause further work even if called manually: unset CRON_SECRET
+--    in Vercel (the route then fails closed with 503).
+-- 3. A stuck global lease clears itself after 270 s; no manual action needed.
+-- 4. Remove the Vault secrets only if the integration is being retired:
+-- delete from vault.secrets where name in ('civicfix_ai_worker_url', 'civicfix_cron_secret');
+-- Job rows are retained for audit; nothing here deletes reports or analyses.
+-- 5. Migrations 0019–0022 are additive and have no down-migrations; undoing
+--    them is a separately approved manual change, or a restore from STEP 0.

@@ -227,13 +227,13 @@ async function performResolution(
   let afterPath: string;
   try {
     const buffer = Buffer.from(await afterPhoto.arrayBuffer());
-    const { error: bufferError, extension } = validateImageBuffer(buffer);
+    const { error: bufferError, extension, mimeType } = validateImageBuffer(buffer);
     if (bufferError) return { error: bufferError };
     afterPath = `resolution/${reportId}/${randomUUID()}.${extension}`;
 
     const { error: uploadError } = await admin.storage
       .from("report-media")
-      .upload(afterPath, buffer, { contentType: afterPhoto.type || "image/jpeg" });
+      .upload(afterPath, buffer, { contentType: mimeType });
     if (uploadError) return { error: "Evidence upload failed. Please try again." };
 
     const { data: mediaRow, error: mediaError } = await admin
@@ -244,7 +244,7 @@ async function performResolution(
         kind: "after",
         file_path: afterPath,
         file_type: "image",
-        mime_type: afterPhoto.type || "image/jpeg",
+        mime_type: mimeType,
       })
       .select("id")
       .single();

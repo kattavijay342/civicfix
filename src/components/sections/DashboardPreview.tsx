@@ -58,8 +58,8 @@ export function DashboardPreview() {
         </Reveal>
 
         <p className="mt-6 text-center text-xs text-foreground-muted">
-          Preview built with sample data — connects to live department and issue data in a later
-          phase.
+          Illustrative preview with sample figures — the live dashboards show your jurisdiction&apos;s
+          real reports once you sign in.
         </p>
       </div>
     </section>

@@ -29,20 +29,37 @@ describe("Navbar — Report a Problem visibility", () => {
   });
 
   it.each([
-    ["government", "/government", "Authorized Government User"],
     ["department_incharge", "/department", "Department In-charge"],
     ["admin", "/admin", "Admin"],
-  ] as const)("keeps %s's own dashboard link and the public links", (role, href, label) => {
+  ] as const)("keeps %s's own dashboard link", (role, href, label) => {
     const html = render(role);
     expect(html).toContain(`href="${href}"`);
     expect(html).toContain(`>${label}<`);
-    for (const publicHref of ["/", "/#how-it-works", "/#explore", "/#about"]) {
-      expect(html).toContain(`href="${publicHref}"`);
-    }
   });
 
   it("keeps the citizen dashboard link for citizens and visitors", () => {
     expect(render("citizen")).toContain('href="/dashboard"');
     expect(render(null)).toContain('href="/dashboard"');
+  });
+});
+
+describe("Navbar — removed links", () => {
+  it.each([null, "citizen", "government", "department_incharge", "admin"] as const)(
+    "has no Home / How It Works / Issues / About links for %s",
+    (role) => {
+      const html = render(role);
+      for (const label of ["Home", "How It Works", "Issues", "About"]) {
+        expect(html).not.toContain(`>${label}</a>`);
+      }
+      for (const href of ["/#how-it-works", "/#explore", "/#about"]) {
+        expect(html).not.toContain(`href="${href}"`);
+      }
+    },
+  );
+
+  it("has no Authorized Government User link for government", () => {
+    const html = render("government");
+    expect(html).not.toContain("Authorized Government User");
+    expect(html).not.toContain('href="/government"');
   });
 });

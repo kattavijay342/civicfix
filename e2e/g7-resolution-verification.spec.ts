@@ -3,6 +3,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
 import { TEST_CITIZEN, TEST_DEPARTMENT_INCHARGE, TEST_GOVERNMENT, tinyJpegBuffer } from "./fixtures";
 import { AUTH_STATE_PATH } from "./global-setup";
+import { requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * Phase G7 — Resolution -> Citizen Verification in a real browser against
@@ -20,11 +21,9 @@ import { AUTH_STATE_PATH } from "./global-setup";
  * notifications), storage object and throwaway user is deleted in afterAll.
  */
 
-try {
-  process.loadEnvFile(".env.local");
-} catch {
-  // Env already provided by the shell/CI.
-}
+// LOCAL Supabase only (e2e/local-supabase-guard.ts): loads .env.g8-local, never
+// .env.local, and aborts this file for any non-local URL or hosted key.
+requireLocalSupabaseEnv();
 
 const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const T = (tag: string) => `G7 ${tag} pothole near RTC Bus Stand ${RUN_ID}`;

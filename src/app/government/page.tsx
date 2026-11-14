@@ -17,6 +17,7 @@ import { DepartmentTrendCard } from "@/components/cards/DepartmentTrendCard";
 import { FollowUpCenter } from "@/components/cards/FollowUpCenter";
 import { IncidentsSection } from "@/components/cards/IncidentsSection";
 import { RecentReportsCard } from "@/components/cards/RecentReportsCard";
+import { AreaConcentrationCard } from "@/components/cards/AreaConcentrationCard";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { statusLabels } from "@/components/ui/StatusBadge";
 import { categoryLabels } from "@/lib/categories";
@@ -31,7 +32,8 @@ import {
   getResolutionQuality,
   getDepartmentWorkload,
   getDepartmentTrends,
-  getCategoryTrends,
+  getCategoryTrendsWithComparison,
+  getAreaBreakdown,
 } from "@/lib/data/government";
 import { getActionRequired } from "@/lib/data/action-required";
 import { isActionQueue } from "@/lib/action-required";
@@ -94,6 +96,7 @@ export default async function GovernmentDashboardPage({
     departmentWorkload,
     departmentTrends,
     categoryTrends,
+    areaBreakdown,
     actionRequired,
     followUpCenter,
     incidents,
@@ -107,7 +110,8 @@ export default async function GovernmentDashboardPage({
     getResolutionQuality(),
     getDepartmentWorkload(),
     getDepartmentTrends(),
-    getCategoryTrends(30),
+    getCategoryTrendsWithComparison(30),
+    getAreaBreakdown(),
     getActionRequired(),
     getFollowUpCenter(),
     getIncidentList(),
@@ -127,7 +131,7 @@ export default async function GovernmentDashboardPage({
       overview: areaOverview,
       aging,
       quality: resolutionQuality,
-      categories: categoryTrends ?? [],
+      categories: categoryTrends.current ?? [],
       workload: departmentWorkload,
     });
     const grounded = await generateGovernmentAIInsights(metrics);
@@ -175,6 +179,7 @@ export default async function GovernmentDashboardPage({
               critical: areaOverview.critical,
               resolutionRate: areaOverview.resolutionRate,
             }}
+            areaBreakdown={areaBreakdown}
           />
           <p className="mt-2 text-xs text-foreground-muted">
             On-time resolution data unavailable — no configured SLA.
@@ -231,13 +236,13 @@ export default async function GovernmentDashboardPage({
               <div className="rounded-2xl border border-border bg-white p-6">
                 <h2 className="text-lg font-semibold text-foreground">Category Trends</h2>
                 <div className="mt-4">
-                  <CategoryTrendsChart trends={categoryTrends} days={30} />
+                  <CategoryTrendsChart data={categoryTrends} days={30} />
                 </div>
               </div>
             </section>
 
             {/* D. Department Performance */}
-            <section className="mt-10">
+            <section id="department-performance" className="mt-10 scroll-mt-24">
               <h2 className="text-lg font-semibold text-foreground">Department Performance</h2>
               <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-5">
                 <div className="min-w-0 rounded-2xl border border-border bg-white p-6 lg:col-span-2">
@@ -270,6 +275,16 @@ export default async function GovernmentDashboardPage({
             </section>
 
             {/* E. Geographic Concentration */}
+            <section className="mt-10">
+              <h2 className="text-lg font-semibold text-foreground">Area Concentration</h2>
+              <p className="mt-1 text-sm text-foreground-muted">
+                Issues per location in your jurisdiction — descriptive counts, not a ranking.
+              </p>
+              <div className="mt-4 rounded-2xl border border-border bg-white p-6">
+                <AreaConcentrationCard rows={areaBreakdown} />
+              </div>
+            </section>
+
             <section className="mt-10">
               <h2 className="text-lg font-semibold text-foreground">Government Area Map</h2>
               <p className="mt-1 text-sm text-foreground-muted">

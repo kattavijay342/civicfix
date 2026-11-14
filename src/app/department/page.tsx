@@ -164,7 +164,7 @@ export default async function DepartmentDashboardPage({
         </div>
       )}
 
-      <div className="mt-6">
+      <div id="assigned-issues" className="mt-6 scroll-mt-24">
         <IssueListFilterBar basePath="/department" filters={filters} />
       </div>
 

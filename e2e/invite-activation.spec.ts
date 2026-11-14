@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { randomBytes } from "node:crypto";
+import { requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * Admin-provisioned account activation (/auth/accept-invite), end to end
@@ -16,9 +17,11 @@ import { randomBytes } from "node:crypto";
  * The invite redirect is generated for the production origin (the one on
  * Supabase's Redirect URLs allow-list) and the resulting fragment is
  * replayed on this server's /auth/accept-invite. Every throwaway account
- * is deleted afterwards. Needs .env.local (service role) for setup only.
+ * is deleted afterwards. Needs .env.g8-local (local service role) for setup only.
  */
-process.loadEnvFile(".env.local");
+// LOCAL Supabase only (e2e/local-supabase-guard.ts): loads .env.g8-local, never
+// .env.local, and aborts this file for any non-local URL or hosted key.
+requireLocalSupabaseEnv();
 
 test.use({ storageState: { cookies: [], origins: [] } });
 

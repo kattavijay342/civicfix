@@ -67,6 +67,32 @@ describe("confirmSameIncident", () => {
     await expect(confirmSameIncident(validInput)).rejects.toBeInstanceOf(IncidentAIUnavailableError);
   });
 
+  it("keeps the existing model and passes the worker's abort signal through (AI-2)", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockResolvedValue({ text: JSON.stringify({ same_incident: false, confidence: 0.3, reasoning: "Different." }) });
+    const signal = new AbortController().signal;
+    await confirmSameIncident(validInput, { signal, timeoutMs: 90_000 });
+    expect(generateContentMock.mock.calls[0][0]).toMatchObject({ model: "gemini-3.6-flash", config: { abortSignal: signal } });
+  });
+
+  it.each([
+    ["HTTP 503", Object.assign(new Error("high demand"), { status: 503 }), { kind: "http", status: 503 }],
+    ["HTTP 404", Object.assign(new Error("model not found"), { status: 404 }), { kind: "http", status: 404 }],
+    ["abort/timeout", Object.assign(new Error("aborted"), { name: "AbortError" }), { kind: "timeout" }],
+    ["network", new TypeError("fetch failed"), { kind: "network" }],
+  ])("classifies a %s failure for the AI-2 worker", async (_label, error, expected) => {
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockRejectedValue(error);
+    await expect(confirmSameIncident(validInput)).rejects.toMatchObject(expected);
+  });
+
+  it("classifies a missing key and invalid output as such", async () => {
+    await expect(confirmSameIncident(validInput)).rejects.toMatchObject({ kind: "not_configured" });
+    process.env.GEMINI_API_KEY = "test-key";
+    generateContentMock.mockResolvedValue({ text: "not json" });
+    await expect(confirmSameIncident(validInput)).rejects.toMatchObject({ kind: "invalid_output" });
+  });
+
   it("throws when a required field is missing", async () => {
     process.env.GEMINI_API_KEY = "test-key";
     generateContentMock.mockResolvedValue({

@@ -5,40 +5,52 @@ import { ListChecks, CheckCircle2, Clock, AlertOctagon, TrendingUp, MapPinned } 
 import { DashboardStat } from "@/components/cards/DashboardStat";
 import { SortablePendingIssues } from "@/components/cards/SortablePendingIssues";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { stateNames, getDistricts, getConstituencies, getAreas } from "@/lib/jurisdiction";
+import {
+  distinctLevelValues,
+  rowsMatchingFilter,
+  sumAreaBreakdown,
+  type AreaBreakdownRow,
+} from "@/lib/government-analytics";
 import type { CivicIssue } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 interface JurisdictionExplorerProps {
+  /** Most recent issues (bounded feed) — used ONLY for the pending-issue
+   * list below, never for aggregate totals. */
   issues: CivicIssue[];
+  /** Jurisdiction-wide totals from get_area_overview() / get_insight_metrics(). */
   fallbackOverview: {
     totalIssues: number;
     resolved: number;
     pending: number;
-    critical: number;
+    critical: number | null;
     resolutionRate: number;
   };
+  /** get_area_breakdown() rows (RLS-scoped). Filtered totals are summed
+   * from these; null when the RPC is unavailable. */
+  areaBreakdown: AreaBreakdownRow[] | null;
 }
 
-function computeStats(issues: CivicIssue[]) {
-  const totalIssues = issues.length;
-  const resolved = issues.filter((i) => i.status === "RESOLVED").length;
-  const pending = totalIssues - resolved;
-  const critical = issues.filter((i) => i.priority === "CRITICAL").length;
-  const highPriority = issues.filter((i) => i.priority === "HIGH").length;
-  const resolutionRate = totalIssues ? Math.round((resolved / totalIssues) * 100) : 0;
-  return { totalIssues, resolved, pending, critical, highPriority, resolutionRate };
-}
+const dash = "—";
 
-export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionExplorerProps) {
+export function JurisdictionExplorer({ issues, fallbackOverview, areaBreakdown }: JurisdictionExplorerProps) {
   const [state, setState] = useState("");
   const [district, setDistrict] = useState("");
   const [constituency, setConstituency] = useState("");
   const [area, setArea] = useState("");
 
-  const districtOptions = useMemo(() => getDistricts(state), [state]);
-  const constituencyOptions = useMemo(() => getConstituencies(state, district), [state, district]);
-  const areaOptions = useMemo(() => getAreas(state, district, constituency), [state, district, constituency]);
+  // Display narrowing only: options and totals come from the caller's own
+  // RLS-scoped breakdown, so no place outside the jurisdiction can appear.
+  const rows = useMemo(() => areaBreakdown ?? [], [areaBreakdown]);
+  const stateOptions = useMemo(() => distinctLevelValues(rows, "state", {}), [rows]);
+  const districtOptions = useMemo(() => (state ? distinctLevelValues(rows, "district", { state }) : []), [rows, state]);
+  const constituencyOptions = useMemo(
+    () => (district ? distinctLevelValues(rows, "constituency", { state, district }) : []),
+    [rows, state, district]
+  );
+  const areaOptions = useMemo(
+    () => (constituency ? distinctLevelValues(rows, "area", { state, district, constituency }) : []),
+    [rows, state, district, constituency]
+  );
 
   const hasFilter = !!state;
 
@@ -54,7 +66,25 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
   }, [issues, hasFilter, state, district, constituency, area]);
 
   const pendingIssues = filteredIssues.filter((i) => i.status !== "RESOLVED");
-  const stats = hasFilter ? computeStats(filteredIssues) : null;
+  const filter = { state, district, constituency, area };
+  const filteredTotals = hasFilter && areaBreakdown ? sumAreaBreakdown(rowsMatchingFilter(areaBreakdown, filter)) : null;
+  const shown = hasFilter
+    ? filteredTotals
+      ? {
+          totalIssues: String(filteredTotals.totalIssues),
+          resolved: String(filteredTotals.resolved),
+          pending: String(filteredTotals.pending),
+          critical: String(filteredTotals.criticalOpen),
+          resolutionRate: `${filteredTotals.resolutionRate}%`,
+        }
+      : { totalIssues: dash, resolved: dash, pending: dash, critical: dash, resolutionRate: dash }
+    : {
+        totalIssues: String(fallbackOverview.totalIssues),
+        resolved: String(fallbackOverview.resolved),
+        pending: String(fallbackOverview.pending),
+        critical: fallbackOverview.critical === null ? dash : String(fallbackOverview.critical),
+        resolutionRate: `${fallbackOverview.resolutionRate}%`,
+      };
 
   const selectClass =
     "min-h-10 rounded-lg border border-border bg-white px-3 py-2 text-xs font-medium text-foreground focus-visible:border-civic-400 disabled:cursor-not-allowed disabled:opacity-50";
@@ -78,7 +108,7 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
             className={selectClass}
           >
             <option value="">All States</option>
-            {stateNames.map((s) => (
+            {stateOptions.map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
@@ -148,47 +178,30 @@ export function JurisdictionExplorer({ issues, fallbackOverview }: JurisdictionE
         <p className="mt-3 text-[11px] text-foreground-muted">
           {hasFilter
             ? `Showing issues matching ${[area, constituency, district, state].filter(Boolean).join(", ")}.`
-            : "State/district/constituency/area list is a demo dataset for Andhra Pradesh and Telangana only — select a state to filter your real issues by area."}
+            : areaBreakdown === null
+              ? "Area filter unavailable right now — showing jurisdiction-wide totals."
+              : "Only places that appear in your jurisdiction's reports are listed."}
         </p>
       </div>
 
-      <div className={cn("mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2", stats ? "lg:grid-cols-5" : "lg:grid-cols-5")}>
-        <DashboardStat
-          icon={ListChecks}
-          label="Total Issues"
-          value={String(stats ? stats.totalIssues : fallbackOverview.totalIssues)}
-        />
-        <DashboardStat
-          icon={CheckCircle2}
-          label="Resolved"
-          value={String(stats ? stats.resolved : fallbackOverview.resolved)}
-        />
-        <DashboardStat
-          icon={Clock}
-          label="Pending"
-          value={String(stats ? stats.pending : fallbackOverview.pending)}
-        />
-        <DashboardStat
-          icon={AlertOctagon}
-          label="Critical"
-          value={String(stats ? stats.critical : fallbackOverview.critical)}
-        />
-        <DashboardStat
-          icon={TrendingUp}
-          label="Overall Resolution Rate"
-          value={`${stats ? stats.resolutionRate : fallbackOverview.resolutionRate}%`}
-          tone="civic"
-        />
+      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5" data-testid="overview-kpis">
+        <DashboardStat icon={ListChecks} label="Total Issues" value={shown.totalIssues} />
+        <DashboardStat icon={CheckCircle2} label="Resolved" value={shown.resolved} />
+        <DashboardStat icon={Clock} label="Pending" value={shown.pending} />
+        <DashboardStat icon={AlertOctagon} label="Critical (open)" value={shown.critical} />
+        <DashboardStat icon={TrendingUp} label="Overall Resolution Rate" value={shown.resolutionRate} tone="civic" />
       </div>
-      {hasFilter && (
-        <p className="mt-2 text-[11px] text-foreground-muted">
-          Computed from {filteredIssues.length} issue{filteredIssues.length === 1 ? "" : "s"} matching this
-          area filter — not your full jurisdiction-wide aggregate above.
-        </p>
-      )}
+      <p className="mt-2 text-[11px] text-foreground-muted">
+        {hasFilter
+          ? filteredTotals
+            ? "Totals for this area filter, from all of its issues."
+            : "Area totals unavailable right now."
+          : "Pending includes reopened issues. Critical counts unresolved critical-priority issues only."}
+      </p>
 
       <div className="mt-8">
         <h2 className="text-lg font-semibold text-foreground">Pending Issues</h2>
+        <p className="mt-1 text-xs text-foreground-muted">From the {issues.length} most recent issues.</p>
         <div className="mt-4">
           {pendingIssues.length > 0 ? (
             <SortablePendingIssues issues={pendingIssues} />

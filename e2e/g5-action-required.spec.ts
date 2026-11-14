@@ -1,6 +1,7 @@
 import { test, expect, type Browser, type Page } from "@playwright/test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { TEST_CITIZEN, TEST_DEPARTMENT_INCHARGE, TEST_GOVERNMENT } from "./fixtures";
+import { requireLocalSupabaseEnv } from "./local-supabase-guard";
 
 /**
  * Phase G5 — Government "Action Required" command center in a real browser
@@ -12,15 +13,14 @@ import { TEST_CITIZEN, TEST_DEPARTMENT_INCHARGE, TEST_GOVERNMENT } from "./fixtu
  * naming a DEACTIVATED in-charge; plus one Tenali report gov1 must never see.
  * Throwaway @test.civicfix.local users: the deactivated in-charge (its
  * department_incharges row is inactive from the start, so it's never
- * routable) and an empty-jurisdiction government user. Everything —
+ * routable), an empty-jurisdiction government user, and the citizen who
+ * files every fixture (never the shared citizen1). Everything —
  * including reminders created here (cascade) — is deleted in afterAll.
  */
 
-try {
-  process.loadEnvFile(".env.local");
-} catch {
-  // Env already provided by the shell/CI.
-}
+// LOCAL Supabase only (e2e/local-supabase-guard.ts): loads .env.g8-local, never
+// .env.local, and aborts this file for any non-local URL or hosted key.
+requireLocalSupabaseEnv();
 
 const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const T = (tag: string) => `G5 E2E ${tag} ${RUN_ID}`;
@@ -34,6 +34,7 @@ const STALE_PHONE = "+910000000077";
 let admin: SupabaseClient;
 let roadsId: string;
 let incharge1Id: string;
+let reporterId: string;
 const reportIds: string[] = [];
 const userIds: string[] = [];
 const ids: Record<string, string> = {};
@@ -85,7 +86,9 @@ async function fixture(
   const { data: report, error } = await admin
     .from("reports")
     .insert({
-      reporter_id: await userId(TEST_CITIZEN.email),
+      // A throwaway reporter (not citizen1), so the access-control test's
+      // citizen1 never sees these fixtures as its own reports.
+      reporter_id: reporterId,
       title,
       description: `${title}. Disposable G5 E2E fixture — deleted after the run.`,
       category: "road",
@@ -139,6 +142,8 @@ test.describe.serial("G5 government Action Required command center", () => {
       .update({ role: "government", gov_state: "Andhra Pradesh", gov_district: `G5 Empty District ${RUN_ID}` })
       .eq("id", userIds[userIds.length - 1]);
 
+    reporterId = (await throwawayUser("reporter")).id;
+
     await fixture("critical", { priority: "critical" });
     await fixture("aged", { priority: "low", ageDays: 9.3 });
     await fixture("reopened", { status: "reopened", priority: "low" });
@@ -165,7 +170,7 @@ test.describe.serial("G5 government Action Required command center", () => {
     await expect(row(p, "critical")).toContainText("Critical issue");
     await expect(row(p, "aged")).toContainText("Pending for 9 days");
     await expect(row(p, "reopened")).toContainText("Reopened");
-    await expect(row(p, "unrouted")).toContainText("Routing pending — awaiting AI analysis");
+    await expect(row(p, "unrouted")).toContainText("Routing pending — not yet assigned to a department");
     await expect(row(p, "unrouted")).toContainText("Not routed yet");
     await expect(row(p, "stale")).toContainText("Department in-charge unavailable");
 
